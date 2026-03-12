@@ -17,17 +17,9 @@ type AnalyzeResponse = {
   prediction?: string;
   confidence?: number;
   riskLevel?: string;
-  boxes?: {
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-  }[];
+  boxes?: any[];
   annotatedImageBase64?: string;
   gradCamBase64?: string;
-  modelName?: string;
-  summary?: string;
-  recommendation?: string;
 };
 
 export default function UploadPage() {
@@ -36,13 +28,22 @@ export default function UploadPage() {
   const [firebaseUser, setFirebaseUser] =
     useState<User | null>(null);
 
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState("");
+  const [file, setFile] =
+    useState<File | null>(null);
 
-  const [loading, setLoading] = useState(false);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [preview, setPreview] =
+    useState("");
 
+  const [loading, setLoading] =
+    useState(false);
+
+  const [authLoading, setAuthLoading] =
+    useState(true);
+
+  const [error, setError] =
+    useState("");
+
+  // auth
   useEffect(() => {
     const unsub = onAuthStateChanged(
       auth,
@@ -60,49 +61,49 @@ export default function UploadPage() {
     return () => unsub();
   }, [router]);
 
-  // ✅ VALIDATION
+  // ✅ MOBILE SAFE FILE HANDLER
   const handleFile = (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
-    const selected = e.target.files?.[0];
+    const selected =
+      e.target.files?.[0];
+
     if (!selected) return;
 
     setError("");
 
-    if (!selected.type.startsWith("image/")) {
-      setError("Only image allowed");
-      return;
-    }
-
-    const allowed = [
-      "image/png",
-      "image/jpeg",
-      "image/jpg",
-    ];
-
-    if (!allowed.includes(selected.type)) {
-      setError("Only PNG/JPG X-ray allowed");
-      return;
-    }
-
-    const name = selected.name.toLowerCase();
-
+    // allow all image types
     if (
-      !name.includes("wrist") &&
-      !name.includes("xray")
+      !selected.type.startsWith(
+        "image/"
+      )
     ) {
-      setError("Upload wrist X-ray");
+      setError(
+        "Only image files allowed"
+      );
       return;
     }
 
     setFile(selected);
 
-    const reader = new FileReader();
+    const reader =
+      new FileReader();
 
-    reader.onload = () =>
-      setPreview(reader.result as string);
+    reader.onload = () => {
+      setPreview(
+        reader.result as string
+      );
+    };
 
-    reader.readAsDataURL(selected);
+    reader.onerror = () => {
+      setError(
+        "Failed to read image"
+      );
+    };
+
+    reader.readAsDataURL(
+      selected
+    );
   };
 
   const removeImage = () => {
@@ -111,84 +112,118 @@ export default function UploadPage() {
     setError("");
   };
 
-  const base64DataOnly = (dataUrl: string) => {
+  const base64DataOnly = (
+    dataUrl: string
+  ) => {
     if (!dataUrl) return "";
 
-    if (dataUrl.startsWith("data:image/")) {
-      return dataUrl.split(",")[1];
+    if (
+      dataUrl.startsWith(
+        "data:image/"
+      )
+    ) {
+      return dataUrl.split(
+        ","
+      )[1];
     }
 
     return dataUrl;
   };
 
-  const analyzeImage = async () => {
-    if (!firebaseUser) return;
-    if (!file) return;
+  const analyzeImage =
+    async () => {
+      if (!firebaseUser) return;
+      if (!file) return;
 
-    setLoading(true);
-    setError("");
+      setLoading(true);
+      setError("");
 
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
+      try {
+        const formData =
+          new FormData();
 
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/analyze`,
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
-
-      const data: AnalyzeResponse & {
-        detail?: string;
-      } = await res.json();
-
-      if (!res.ok) {
-        throw new Error(
-          data.detail || "Analysis failed"
+        formData.append(
+          "file",
+          file
         );
-      }
 
-      const docRef = await addDoc(
-        collection(db, "cases"),
-        {
-          userId: firebaseUser.uid,
-          userEmail:
-            firebaseUser.email || "",
+        const res =
+          await fetch(
+            `${process.env.NEXT_PUBLIC_API_URL}/analyze`,
+            {
+              method: "POST",
+              body: formData,
+            }
+          );
 
-          prediction:
-            data.prediction || "Unknown",
+        const data:
+          AnalyzeResponse & {
+            detail?: string;
+          } =
+          await res.json();
 
-          confidence:
-            data.confidence || 0,
-
-          riskLevel:
-            data.riskLevel || "",
-
-          originalImageBase64:
-            base64DataOnly(preview),
-
-          annotatedImageBase64:
-            data.annotatedImageBase64 || "",
-
-          gradCamBase64:
-            data.gradCamBase64 || "",
-
-          createdAt:
-            serverTimestamp(),
+        if (!res.ok) {
+          throw new Error(
+            data.detail ||
+              "Analysis failed"
+          );
         }
-      );
 
-      router.push(
-        `/report/${docRef.id}`
-      );
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+        const docRef =
+          await addDoc(
+            collection(
+              db,
+              "cases"
+            ),
+            {
+              userId:
+                firebaseUser.uid,
+
+              userEmail:
+                firebaseUser.email ||
+                "",
+
+              prediction:
+                data.prediction ||
+                "Unknown",
+
+              confidence:
+                data.confidence ||
+                0,
+
+              riskLevel:
+                data.riskLevel ||
+                "",
+
+              originalImageBase64:
+                base64DataOnly(
+                  preview
+                ),
+
+              annotatedImageBase64:
+                data.annotatedImageBase64 ||
+                "",
+
+              gradCamBase64:
+                data.gradCamBase64 ||
+                "",
+
+              createdAt:
+                serverTimestamp(),
+            }
+          );
+
+        router.push(
+          `/report/${docRef.id}`
+        );
+      } catch (err: any) {
+        setError(
+          err.message
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
 
   if (authLoading) {
     return (
@@ -218,18 +253,22 @@ export default function UploadPage() {
 
         <button
           onClick={() =>
-            router.push("/dashboard")
+            router.push(
+              "/dashboard"
+            )
           }
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--primary-dark)] text-white"
         >
-          <ArrowLeft size={16} />
+          <ArrowLeft
+            size={16}
+          />
           Back
         </button>
       </div>
 
       {/* CARD */}
 
-      <div className="max-w-3xl mx-auto mt-8 sm:mt-10 bg-white p-5 sm:p-8 rounded-[24px] shadow-[var(--shadow-card)]">
+      <div className="max-w-3xl mx-auto mt-8 bg-white p-5 sm:p-8 rounded-[24px] shadow-[var(--shadow-card)]">
 
         {error && (
           <div className="mb-4 text-red-600 text-sm">
@@ -237,14 +276,17 @@ export default function UploadPage() {
           </div>
         )}
 
-        {/* UPLOAD BOX */}
+        {/* UPLOAD */}
 
         <label className="block border-2 border-dashed border-[var(--primary)] rounded-[20px] p-6 sm:p-10 text-center cursor-pointer">
 
           <input
             type="file"
-            accept=".png,.jpg,.jpeg"
-            onChange={handleFile}
+            accept="image/*"
+            capture="environment"
+            onChange={
+              handleFile
+            }
             className="hidden"
           />
 
@@ -252,16 +294,20 @@ export default function UploadPage() {
             <div className="flex flex-col items-center">
 
               <UploadCloud
-                className="text-[var(--primary)]"
                 size={36}
+                className="text-[var(--primary)]"
               />
 
               <p className="mt-3 font-semibold text-lg">
-                Upload Wrist X-ray
+                Upload X-ray
               </p>
 
               <p className="text-sm text-gray-500">
-                PNG / JPG only
+                Camera /
+                Gallery /
+                PNG /
+                JPG /
+                HEIC
               </p>
 
             </div>
@@ -271,7 +317,6 @@ export default function UploadPage() {
               className="max-h-64 mx-auto rounded-xl shadow"
             />
           )}
-
         </label>
 
         {/* BUTTONS */}
@@ -280,24 +325,34 @@ export default function UploadPage() {
 
           {file && (
             <button
-              onClick={removeImage}
+              onClick={
+                removeImage
+              }
               className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl border"
             >
-              <Trash2 size={16} />
+              <Trash2
+                size={16}
+              />
               Remove
             </button>
           )}
 
           <button
-            onClick={analyzeImage}
-            disabled={loading}
+            onClick={
+              analyzeImage
+            }
+            disabled={
+              loading
+            }
             className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[var(--primary-dark)] text-white"
           >
-            <ScanSearch size={16} />
+            <ScanSearch
+              size={16}
+            />
 
             {loading
               ? "Analyzing..."
-              : "Analyze Wrist X-ray"}
+              : "Analyze X-ray"}
           </button>
 
         </div>
