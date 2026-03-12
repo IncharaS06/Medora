@@ -7,7 +7,6 @@ import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import {
   UploadCloud,
-  ImagePlus,
   ArrowLeft,
   Trash2,
   ScanSearch,
@@ -56,22 +55,45 @@ export default function UploadPage() {
     return () => unsub();
   }, [router]);
 
+  // ✅ ONLY WRIST XRAY VALIDATION
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
     if (!selected) return;
 
     setError("");
+
+    // only image
+    if (!selected.type.startsWith("image/")) {
+      setError("Only image files allowed");
+      return;
+    }
+
+    // only png jpg jpeg
+    const allowed = ["image/png", "image/jpeg", "image/jpg"];
+
+    if (!allowed.includes(selected.type)) {
+      setError("Only PNG/JPG X-ray allowed");
+      return;
+    }
+
+    // filename check
+    const name = selected.name.toLowerCase();
+
+    if (!name.includes("wrist") && !name.includes("xray")) {
+      setError("Upload only WRIST X-ray image");
+      return;
+    }
+
     setFile(selected);
 
     const reader = new FileReader();
 
     reader.onload = () => {
-      const base64 = reader.result as string;
-      setPreview(base64);
+      setPreview(reader.result as string);
     };
 
     reader.onerror = () => {
-      setError("Failed to read uploaded image.");
+      setError("Failed to read image");
     };
 
     reader.readAsDataURL(selected);
@@ -87,8 +109,7 @@ export default function UploadPage() {
     if (!dataUrl) return "";
 
     if (dataUrl.startsWith("data:image/")) {
-      const parts = dataUrl.split(",");
-      return parts[1] || "";
+      return dataUrl.split(",")[1] || "";
     }
 
     return dataUrl;
@@ -96,12 +117,12 @@ export default function UploadPage() {
 
   const analyzeImage = async () => {
     if (!firebaseUser) {
-      setError("User not logged in.");
+      setError("User not logged in");
       return;
     }
 
     if (!file) {
-      setError("Upload an image first.");
+      setError("Upload wrist X-ray first");
       return;
     }
 
@@ -112,18 +133,21 @@ export default function UploadPage() {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/analyze`, {
-  method: "POST",
-  body: formData,
-});
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/analyze`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
 
-      const data: AnalyzeResponse & { detail?: string } = await res.json();
+      const data: AnalyzeResponse & { detail?: string } =
+        await res.json();
 
       if (!res.ok) {
         throw new Error(data.detail || "Analysis failed");
       }
 
-      // SAVE TO FIRESTORE
       const docRef = await addDoc(collection(db, "cases"), {
         userId: firebaseUser.uid,
         userEmail: firebaseUser.email || "",
@@ -131,7 +155,10 @@ export default function UploadPage() {
         patientName: "Unknown",
 
         prediction: data.prediction || "Unknown",
-        confidence: typeof data.confidence === "number" ? data.confidence : 0,
+        confidence:
+          typeof data.confidence === "number"
+            ? data.confidence
+            : 0,
         riskLevel: data.riskLevel || "",
 
         boxes: Array.isArray(data.boxes) ? data.boxes : [],
@@ -140,30 +167,34 @@ export default function UploadPage() {
         annotatedImageBase64: data.annotatedImageBase64 || "",
         gradCamBase64: data.gradCamBase64 || "",
 
-        modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
+        modelName:
+          data.modelName || "EfficientNet-B3 + YOLOv8",
 
         summary:
           data.summary ||
-          ((data.prediction || "").toLowerCase() === "fracture"
-            ? "Suspicious fracture-related region detected in the wrist radiograph."
-            : "No strong fracture-related localization detected by the model."),
+          ((data.prediction || "").toLowerCase() ===
+          "fracture"
+            ? "Suspicious fracture detected in wrist."
+            : "No fracture detected."),
 
         recommendation:
           data.recommendation ||
-          ((data.prediction || "").toLowerCase() === "fracture"
-            ? "Clinical review recommended. Correlate with radiologist interpretation."
-            : "Model suggests a normal case, but clinical review is still advised."),
+          ((data.prediction || "").toLowerCase() ===
+          "fracture"
+            ? "Clinical review recommended."
+            : "Still verify clinically."),
 
         status: "Completed",
 
         createdAt: serverTimestamp(),
       });
 
-      // IMPORTANT: redirect using document ID
       router.push(`/report/${docRef.id}`);
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Analysis failed. Check backend server.");
+      setError(
+        err.message || "Analysis failed. Check backend"
+      );
     } finally {
       setLoading(false);
     }
@@ -171,63 +202,60 @@ export default function UploadPage() {
 
   if (authLoading) {
     return (
-      <main className="min-h-screen bg-[var(--background)] flex items-center justify-center px-4">
-        <div className="rounded-[28px] bg-white px-8 py-6 shadow-[var(--shadow-soft)]">
-          <p className="text-[var(--primary-dark)] font-semibold text-lg">
-            Loading upload page...
-          </p>
-        </div>
+      <main className="min-h-screen flex items-center justify-center">
+        Loading...
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
-      <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <img src="/logo.png" className="w-10 h-10" alt="MEDORA" />
-          <h1 className="text-xl font-bold text-[var(--primary-dark)]">
-            MEDORA Upload
-          </h1>
-        </div>
+    <main className="min-h-screen p-4">
+
+      <div className="max-w-5xl mx-auto flex justify-between">
+
+        <h1 className="text-xl font-bold">
+          MEDORA Upload
+        </h1>
 
         <button
           onClick={() => router.push("/dashboard")}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--primary-dark)] text-white text-sm font-semibold"
+          className="px-4 py-2 bg-black text-white"
         >
-          <ArrowLeft className="h-4 w-4" />
+          <ArrowLeft />
           Back
         </button>
+
       </div>
 
-      <div className="max-w-3xl mx-auto mt-10 bg-white p-8 rounded-[28px] shadow-[var(--shadow-card)]">
+      <div className="max-w-3xl mx-auto mt-10 bg-white p-8 rounded">
 
         {error && (
-          <div className="mb-4 text-red-600 text-sm font-medium">{error}</div>
+          <div className="text-red-600 mb-4">
+            {error}
+          </div>
         )}
 
-        <label className="block border-2 border-dashed border-[var(--primary)] rounded-[24px] p-10 text-center cursor-pointer">
+        <label className="border-2 border-dashed p-10 text-center cursor-pointer">
 
           <input
             type="file"
-            accept="image/*"
+            accept=".png,.jpg,.jpeg"
             onChange={handleFile}
             className="hidden"
           />
 
           {!preview ? (
-            <div className="flex flex-col items-center">
-              <UploadCloud className="h-10 w-10 text-[var(--primary)]" />
-              <p className="mt-4 font-semibold text-lg">
-                Click to upload radiograph
-              </p>
+            <div>
+              <UploadCloud />
+              <p>Upload WRIST X-ray</p>
             </div>
           ) : (
             <img
               src={preview}
-              className="max-h-72 mx-auto rounded-xl shadow"
+              className="max-h-72 mx-auto"
             />
           )}
+
         </label>
 
         <div className="flex gap-4 mt-6">
@@ -235,9 +263,9 @@ export default function UploadPage() {
           {file && (
             <button
               onClick={removeImage}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border"
+              className="px-4 py-2 border"
             >
-              <Trash2 className="h-4 w-4" />
+              <Trash2 />
               Remove
             </button>
           )}
@@ -245,14 +273,18 @@ export default function UploadPage() {
           <button
             onClick={analyzeImage}
             disabled={loading}
-            className="flex items-center gap-2 px-6 py-3 rounded-xl bg-[var(--primary-dark)] text-white"
+            className="px-6 py-3 bg-black text-white"
           >
-            <ScanSearch className="h-4 w-4" />
-            {loading ? "Analyzing..." : "Analyze & Open Report"}
+            <ScanSearch />
+            {loading
+              ? "Analyzing..."
+              : "Analyze Wrist X-ray"}
           </button>
+
         </div>
+
       </div>
+
     </main>
   );
-
 }
