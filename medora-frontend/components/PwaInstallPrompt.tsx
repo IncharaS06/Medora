@@ -2,102 +2,78 @@
 
 import { useEffect, useState } from "react";
 
-declare global {
-  interface BeforeInstallPromptEvent extends Event {
-    prompt: () => Promise<void>;
-    userChoice: Promise<{
-      outcome: "accepted" | "dismissed";
-      platform: string;
-    }>;
-  }
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 
 export default function PwaInstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
+
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
     const handler = (e: Event) => {
       const evt = e as BeforeInstallPromptEvent;
+
       evt.preventDefault();
+
       setDeferredPrompt(evt);
       setVisible(true);
     };
 
     window.addEventListener("beforeinstallprompt", handler);
 
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-    };
+    return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
   if (!visible || !deferredPrompt) return null;
 
-  const onInstallClick = async () => {
-    try {
-      await deferredPrompt.prompt();
-      const choice = await deferredPrompt.userChoice;
-      console.log("MEDORA install choice:", choice.outcome);
-    } catch (err) {
-      console.error("PWA install failed:", err);
-    } finally {
-      setVisible(false);
-      setDeferredPrompt(null);
-    }
-  };
+  const installApp = async () => {
+    await deferredPrompt.prompt();
 
-  const onClose = () => {
+    const choice = await deferredPrompt.userChoice;
+
+    if (choice.outcome === "accepted") {
+      console.log("User installed MEDORA");
+    }
+
     setVisible(false);
+    setDeferredPrompt(null);
   };
 
   return (
-    <div
-      className="
-        fixed bottom-4 left-1/2 -translate-x-1/2
-        w-[92%] max-w-md
-        z-[9999]
-        rounded-2xl border border-[var(--border)]
-        bg-white/95 backdrop-blur-xl
-        shadow-2xl
-        px-4 py-4
-        flex items-center gap-3
-      "
-    >
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[var(--secondary)]/40">
-        <img src="/logo.png" alt="MEDORA" className="h-7 w-7 object-contain" />
-      </div>
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[90%] max-w-sm bg-white shadow-xl border border-purple-100 rounded-2xl px-4 py-3 flex items-center gap-3">
 
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-bold text-[var(--primary-dark)]">
+      <div className="flex-1">
+        <p className="text-xs font-semibold text-[#7C6EE6]">
           Install MEDORA
         </p>
-        <p className="mt-1 text-xs leading-5 text-[var(--text-soft)]">
-          Add MEDORA to your device for a faster app-like experience with quick
-          access to uploads, reports, and clinical review tools.
+
+        <p className="text-[11px] text-gray-600">
+          Add MEDORA to your home screen for faster access
         </p>
       </div>
 
-      <div className="flex flex-col items-end gap-1.5">
+      <div className="flex flex-col gap-1 items-end">
+
         <button
-          onClick={onInstallClick}
-          className="
-            rounded-full bg-[var(--primary-dark)] px-3.5 py-1.5
-            text-xs font-semibold text-white
-            hover:bg-[var(--primary)]
-            transition
-          "
+          onClick={installApp}
+          className="text-[11px] px-3 py-1.5 rounded-full bg-[#7C6EE6] text-white font-semibold hover:bg-[#6B5DDA]"
         >
           Install
         </button>
 
         <button
-          onClick={onClose}
-          className="text-[11px] text-[var(--text-soft)] hover:text-[var(--foreground)]"
+          onClick={() => setVisible(false)}
+          className="text-[10px] text-gray-400 hover:text-gray-600"
         >
           Not now
         </button>
+
       </div>
+
     </div>
   );
 }
