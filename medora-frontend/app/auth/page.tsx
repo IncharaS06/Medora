@@ -40,6 +40,20 @@ export default function AuthPage() {
     setIsVisible(true);
   }, []);
 
+  // SERVICE WORKER REGISTRATION
+  useEffect(() => {
+    if (typeof window !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker
+        .register("/sw.js")
+        .then((registration) => {
+          console.log("SW registered:", registration.scope);
+        })
+        .catch((err) => {
+          console.error("SW registration failed:", err);
+        });
+    }
+  }, []);
+
   const validate = () => {
     if (!email.includes("@")) {
       setError("Enter a valid email");
@@ -186,8 +200,9 @@ export default function AuthPage() {
 
       <div className="relative z-10 min-h-screen flex items-center justify-center px-4 py-8">
         <div
-          className={`w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 rounded-[32px] overflow-hidden shadow-2xl border border-white/40 bg-white/60 backdrop-blur-xl transition-all duration-700 ${isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
-            }`}
+          className={`w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 rounded-[32px] overflow-hidden shadow-2xl border border-white/40 bg-white/60 backdrop-blur-xl transition-all duration-700 ${
+            isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
+          }`}
         >
           <div className="relative bg-gradient-to-br from-[#7C6EE6] via-[#8D7FF0] to-[#A99CF7] p-8 md:p-12 flex flex-col justify-center items-center text-white min-h-[320px] lg:min-h-[700px]">
             <div className="absolute inset-0 overflow-hidden">
@@ -237,10 +252,11 @@ export default function AuthPage() {
                     setError("");
                     setSuccess("");
                   }}
-                  className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${mode === "login"
+                  className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${
+                    mode === "login"
                       ? "bg-white text-[#7C6EE6] shadow-sm"
                       : "text-[#6F6A8A] hover:text-[#7C6EE6]"
-                    }`}
+                  }`}
                 >
                   Login
                 </button>
@@ -250,10 +266,11 @@ export default function AuthPage() {
                     setError("");
                     setSuccess("");
                   }}
-                  className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${mode === "register"
+                  className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${
+                    mode === "register"
                       ? "bg-white text-[#7C6EE6] shadow-sm"
                       : "text-[#6F6A8A] hover:text-[#7C6EE6]"
-                    }`}
+                  }`}
                 >
                   Register
                 </button>
@@ -356,8 +373,8 @@ export default function AuthPage() {
                   {loading
                     ? "Please wait..."
                     : mode === "login"
-                      ? "Login"
-                      : "Create Account"}
+                    ? "Login"
+                    : "Create Account"}
                 </button>
               </div>
 
@@ -475,3 +492,4 @@ export default function AuthPage() {
     </main>
   );
 }
+alter and give
