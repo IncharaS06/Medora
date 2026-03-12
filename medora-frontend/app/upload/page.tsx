@@ -112,10 +112,10 @@ export default function UploadPage() {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch("http://localhost:8000/analyze", {
-        method: "POST",
-        body: formData,
-      });
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/analyze`, {
+  method: "POST",
+  body: formData,
+});
 
       const data: AnalyzeResponse & { detail?: string } = await res.json();
 
@@ -254,4 +254,5 @@ export default function UploadPage() {
       </div>
     </main>
   );
+
 }
