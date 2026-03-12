@@ -17,7 +17,6 @@ type AnalyzeResponse = {
   prediction?: string;
   confidence?: number;
   riskLevel?: string;
-  boxes?: any[];
   annotatedImageBase64?: string;
   gradCamBase64?: string;
 };
@@ -43,7 +42,7 @@ export default function UploadPage() {
   const [error, setError] =
     useState("");
 
-  // auth
+  // ✅ auth check
   useEffect(() => {
     const unsub = onAuthStateChanged(
       auth,
@@ -61,33 +60,37 @@ export default function UploadPage() {
     return () => unsub();
   }, [router]);
 
-  // ✅ MOBILE SAFE FILE HANDLER
+  // ✅ FILE VALIDATION (UPLOAD ONLY)
   const handleFile = (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
-    const selected =
-      e.target.files?.[0];
+    const selected = e.target.files?.[0];
 
     if (!selected) return;
 
     setError("");
 
-    // allow all image types
-    if (
-      !selected.type.startsWith(
-        "image/"
-      )
-    ) {
-      setError(
-        "Only image files allowed"
-      );
+    // allow only images
+    if (!selected.type.startsWith("image/")) {
+      setError("Only image files allowed");
+      return;
+    }
+
+    const allowed = [
+      "image/png",
+      "image/jpeg",
+      "image/jpg",
+      "image/webp",
+    ];
+
+    if (!allowed.includes(selected.type)) {
+      setError("Only PNG / JPG / JPEG / WEBP allowed");
       return;
     }
 
     setFile(selected);
 
-    const reader =
-      new FileReader();
+    const reader = new FileReader();
 
     reader.onload = () => {
       setPreview(
@@ -122,14 +125,13 @@ export default function UploadPage() {
         "data:image/"
       )
     ) {
-      return dataUrl.split(
-        ","
-      )[1];
+      return dataUrl.split(",")[1];
     }
 
     return dataUrl;
   };
 
+  // ✅ ANALYZE
   const analyzeImage =
     async () => {
       if (!firebaseUser) return;
@@ -280,10 +282,10 @@ export default function UploadPage() {
 
         <label className="block border-2 border-dashed border-[var(--primary)] rounded-[20px] p-6 sm:p-10 text-center cursor-pointer">
 
+          {/* ✅ ONLY UPLOAD — NO CAMERA */}
           <input
             type="file"
-            accept="image/*"
-            capture="environment"
+            accept="image/png,image/jpeg,image/jpg,image/webp"
             onChange={
               handleFile
             }
@@ -299,15 +301,11 @@ export default function UploadPage() {
               />
 
               <p className="mt-3 font-semibold text-lg">
-                Upload X-ray
+                Upload X-ray Image
               </p>
 
               <p className="text-sm text-gray-500">
-                Camera /
-                Gallery /
-                PNG /
-                JPG /
-                HEIC
+                PNG / JPG / JPEG / WEBP
               </p>
 
             </div>
