@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+
 import {
   UploadCloud,
   ArrowLeft,
@@ -32,55 +33,65 @@ type AnalyzeResponse = {
 export default function UploadPage() {
   const router = useRouter();
 
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] =
+    useState<User | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string>("");
+  const [preview, setPreview] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      if (!user) {
-        router.push("/auth");
-        return;
-      }
+    const unsub = onAuthStateChanged(
+      auth,
+      (user) => {
+        if (!user) {
+          router.push("/auth");
+          return;
+        }
 
-      setFirebaseUser(user);
-      setAuthLoading(false);
-    });
+        setFirebaseUser(user);
+        setAuthLoading(false);
+      }
+    );
 
     return () => unsub();
   }, [router]);
 
-  // ✅ ONLY WRIST XRAY VALIDATION
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // ✅ VALIDATION
+  const handleFile = (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const selected = e.target.files?.[0];
     if (!selected) return;
 
     setError("");
 
-    // only image
     if (!selected.type.startsWith("image/")) {
-      setError("Only image files allowed");
+      setError("Only image allowed");
       return;
     }
 
-    // only png jpg jpeg
-    const allowed = ["image/png", "image/jpeg", "image/jpg"];
+    const allowed = [
+      "image/png",
+      "image/jpeg",
+      "image/jpg",
+    ];
 
     if (!allowed.includes(selected.type)) {
       setError("Only PNG/JPG X-ray allowed");
       return;
     }
 
-    // filename check
     const name = selected.name.toLowerCase();
 
-    if (!name.includes("wrist") && !name.includes("xray")) {
-      setError("Upload only WRIST X-ray image");
+    if (
+      !name.includes("wrist") &&
+      !name.includes("xray")
+    ) {
+      setError("Upload wrist X-ray");
       return;
     }
 
@@ -88,13 +99,8 @@ export default function UploadPage() {
 
     const reader = new FileReader();
 
-    reader.onload = () => {
+    reader.onload = () =>
       setPreview(reader.result as string);
-    };
-
-    reader.onerror = () => {
-      setError("Failed to read image");
-    };
 
     reader.readAsDataURL(selected);
   };
@@ -109,22 +115,15 @@ export default function UploadPage() {
     if (!dataUrl) return "";
 
     if (dataUrl.startsWith("data:image/")) {
-      return dataUrl.split(",")[1] || "";
+      return dataUrl.split(",")[1];
     }
 
     return dataUrl;
   };
 
   const analyzeImage = async () => {
-    if (!firebaseUser) {
-      setError("User not logged in");
-      return;
-    }
-
-    if (!file) {
-      setError("Upload wrist X-ray first");
-      return;
-    }
+    if (!firebaseUser) return;
+    if (!file) return;
 
     setLoading(true);
     setError("");
@@ -141,60 +140,51 @@ export default function UploadPage() {
         }
       );
 
-      const data: AnalyzeResponse & { detail?: string } =
-        await res.json();
+      const data: AnalyzeResponse & {
+        detail?: string;
+      } = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.detail || "Analysis failed");
+        throw new Error(
+          data.detail || "Analysis failed"
+        );
       }
 
-      const docRef = await addDoc(collection(db, "cases"), {
-        userId: firebaseUser.uid,
-        userEmail: firebaseUser.email || "",
+      const docRef = await addDoc(
+        collection(db, "cases"),
+        {
+          userId: firebaseUser.uid,
+          userEmail:
+            firebaseUser.email || "",
 
-        patientName: "Unknown",
+          prediction:
+            data.prediction || "Unknown",
 
-        prediction: data.prediction || "Unknown",
-        confidence:
-          typeof data.confidence === "number"
-            ? data.confidence
-            : 0,
-        riskLevel: data.riskLevel || "",
+          confidence:
+            data.confidence || 0,
 
-        boxes: Array.isArray(data.boxes) ? data.boxes : [],
+          riskLevel:
+            data.riskLevel || "",
 
-        originalImageBase64: base64DataOnly(preview),
-        annotatedImageBase64: data.annotatedImageBase64 || "",
-        gradCamBase64: data.gradCamBase64 || "",
+          originalImageBase64:
+            base64DataOnly(preview),
 
-        modelName:
-          data.modelName || "EfficientNet-B3 + YOLOv8",
+          annotatedImageBase64:
+            data.annotatedImageBase64 || "",
 
-        summary:
-          data.summary ||
-          ((data.prediction || "").toLowerCase() ===
-          "fracture"
-            ? "Suspicious fracture detected in wrist."
-            : "No fracture detected."),
+          gradCamBase64:
+            data.gradCamBase64 || "",
 
-        recommendation:
-          data.recommendation ||
-          ((data.prediction || "").toLowerCase() ===
-          "fracture"
-            ? "Clinical review recommended."
-            : "Still verify clinically."),
-
-        status: "Completed",
-
-        createdAt: serverTimestamp(),
-      });
-
-      router.push(`/report/${docRef.id}`);
-    } catch (err: any) {
-      console.error(err);
-      setError(
-        err.message || "Analysis failed. Check backend"
+          createdAt:
+            serverTimestamp(),
+        }
       );
+
+      router.push(
+        `/report/${docRef.id}`
+      );
+    } catch (err: any) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -209,33 +199,47 @@ export default function UploadPage() {
   }
 
   return (
-    <main className="min-h-screen p-4">
+    <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
 
-      <div className="max-w-5xl mx-auto flex justify-between">
+      {/* HEADER */}
 
-        <h1 className="text-xl font-bold">
-          MEDORA Upload
-        </h1>
+      <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+
+        <div className="flex items-center gap-3">
+          <img
+            src="/logo.png"
+            className="w-10 h-10"
+          />
+
+          <h1 className="text-xl font-bold text-[var(--primary-dark)]">
+            MEDORA Upload
+          </h1>
+        </div>
 
         <button
-          onClick={() => router.push("/dashboard")}
-          className="px-4 py-2 bg-black text-white"
+          onClick={() =>
+            router.push("/dashboard")
+          }
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--primary-dark)] text-white"
         >
-          <ArrowLeft />
+          <ArrowLeft size={16} />
           Back
         </button>
-
       </div>
 
-      <div className="max-w-3xl mx-auto mt-10 bg-white p-8 rounded">
+      {/* CARD */}
+
+      <div className="max-w-3xl mx-auto mt-8 sm:mt-10 bg-white p-5 sm:p-8 rounded-[24px] shadow-[var(--shadow-card)]">
 
         {error && (
-          <div className="text-red-600 mb-4">
+          <div className="mb-4 text-red-600 text-sm">
             {error}
           </div>
         )}
 
-        <label className="border-2 border-dashed p-10 text-center cursor-pointer">
+        {/* UPLOAD BOX */}
+
+        <label className="block border-2 border-dashed border-[var(--primary)] rounded-[20px] p-6 sm:p-10 text-center cursor-pointer">
 
           <input
             type="file"
@@ -245,27 +249,41 @@ export default function UploadPage() {
           />
 
           {!preview ? (
-            <div>
-              <UploadCloud />
-              <p>Upload WRIST X-ray</p>
+            <div className="flex flex-col items-center">
+
+              <UploadCloud
+                className="text-[var(--primary)]"
+                size={36}
+              />
+
+              <p className="mt-3 font-semibold text-lg">
+                Upload Wrist X-ray
+              </p>
+
+              <p className="text-sm text-gray-500">
+                PNG / JPG only
+              </p>
+
             </div>
           ) : (
             <img
               src={preview}
-              className="max-h-72 mx-auto"
+              className="max-h-64 mx-auto rounded-xl shadow"
             />
           )}
 
         </label>
 
-        <div className="flex gap-4 mt-6">
+        {/* BUTTONS */}
+
+        <div className="flex flex-col sm:flex-row gap-3 mt-6">
 
           {file && (
             <button
               onClick={removeImage}
-              className="px-4 py-2 border"
+              className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl border"
             >
-              <Trash2 />
+              <Trash2 size={16} />
               Remove
             </button>
           )}
@@ -273,9 +291,10 @@ export default function UploadPage() {
           <button
             onClick={analyzeImage}
             disabled={loading}
-            className="px-6 py-3 bg-black text-white"
+            className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[var(--primary-dark)] text-white"
           >
-            <ScanSearch />
+            <ScanSearch size={16} />
+
             {loading
               ? "Analyzing..."
               : "Analyze Wrist X-ray"}
