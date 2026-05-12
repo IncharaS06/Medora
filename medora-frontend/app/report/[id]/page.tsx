@@ -17,13 +17,14 @@ import {
     ShieldAlert,
 } from "lucide-react";
 
+// Type for raw boxes as stored in Firestore (after conversion)
 type RawBoxType =
     | {
-        x1?: number;
-        y1?: number;
-        x2?: number;
-        y2?: number;
-    }
+          x1?: number;
+          y1?: number;
+          x2?: number;
+          y2?: number;
+      }
     | number[];
 
 type BoxType = {
@@ -38,8 +39,8 @@ type ResultType = {
     userId?: string;
     userEmail?: string;
     patientName?: string;
-    prediction: string;
-    confidence: number;
+    prediction: string;          // "Fracture" or "Normal"
+    confidence: number;          // 0-1
     boxes?: RawBoxType[];
     originalImageBase64?: string;
     annotatedImageBase64?: string;
@@ -51,6 +52,7 @@ type ResultType = {
     createdAt?: Timestamp | string | null;
 };
 
+// Normalize boxes to consistent {x1,y1,x2,y2} format
 function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
     if (!Array.isArray(boxes)) return [];
 
@@ -64,7 +66,6 @@ function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
                     y2: Number(box[3] ?? 0),
                 };
             }
-
             return {
                 x1: Number(box?.x1 ?? 0),
                 y1: Number(box?.y1 ?? 0),
@@ -83,34 +84,29 @@ function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
 
 function getImageSrc(value?: string) {
     if (!value) return "";
-
     const trimmed = value.trim();
     if (!trimmed) return "";
-
     if (trimmed.startsWith("data:image/")) return trimmed;
-
+    // Assume raw base64 if no http and long string
     const looksLikeBase64 =
         trimmed.length > 100 &&
         !trimmed.includes("http://") &&
         !trimmed.includes("https://") &&
         !trimmed.includes("\\") &&
         !trimmed.includes(" ");
-
     if (looksLikeBase64) {
         return `data:image/jpeg;base64,${trimmed}`;
     }
-
     return "";
 }
 
 function formatDate(value?: Timestamp | string | null) {
     if (!value) return new Date().toLocaleString();
-
     if (typeof value === "string") {
-        const parsed = new Date(value);
+        // Try parsing "2026-05-12 05:53:16" format
+        const parsed = new Date(value.replace(" ", "T"));
         return isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
     }
-
     if (typeof value === "object" && value && "toDate" in value) {
         try {
             return value.toDate().toLocaleString();
@@ -118,7 +114,6 @@ function formatDate(value?: Timestamp | string | null) {
             return new Date().toLocaleString();
         }
     }
-
     return new Date().toLocaleString();
 }
 
@@ -130,8 +125,8 @@ export default function ReportPage() {
         typeof params?.id === "string"
             ? params.id
             : Array.isArray(params?.id)
-                ? params.id[0]
-                : "";
+            ? params.id[0]
+            : "";
 
     const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
     const [authResolved, setAuthResolved] = useState(false);
@@ -146,11 +141,9 @@ export default function ReportPage() {
                 router.push("/auth");
                 return;
             }
-
             setFirebaseUser(user);
             setAuthResolved(true);
         });
-
         return () => unsub();
     }, [router]);
 
@@ -173,30 +166,71 @@ export default function ReportPage() {
                     return;
                 }
 
-                const data = snap.data() as Omit<ResultType, "id">;
+                const data = snap.data();
 
+                // Permission check (assumes userId field exists)
                 if (data.userId && data.userId !== firebaseUser.uid) {
                     setError("You do not have permission to view this report.");
                     setResult(null);
                     return;
                 }
 
+                // ---- Map backend fields to UI expected fields ----
+                // 1. Prediction from final_result
+                const rawResult = data.final_result || "Unknown";
+                const prediction =
+                    rawResult.toLowerCase() === "fracture"
+                        ? "Fracture"
+                        : rawResult.toLowerCase() === "normal"
+                        ? "Normal"
+                        : "Unknown";
+
+                // 2. Confidence from fracture_probability (0-100) -> 0-1
+                const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
+                const confidenceNormalized = fractureProb / 100;
+
+                // 3. Parse createdAt: could be Firestore Timestamp or string "2026-05-12 05:53:16"
+                let createdAt = data.createdAt || data.timestamp || null;
+                if (typeof createdAt === "string") {
+                    const parsed = new Date(createdAt.replace(" ", "T"));
+                    createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
+                }
+
+                // 4. Convert detections array to boxes (x1,y1,x2,y2) format expected by normalizeBoxes
+                let boxes: RawBoxType[] = [];
+                const detections = data.detections;
+                if (Array.isArray(detections)) {
+                    boxes = detections.map((det: any) => ({
+                        x1: det.center_x - det.width_px / 2,
+                        y1: det.center_y - det.height_px / 2,
+                        x2: det.center_x + det.width_px / 2,
+                        y2: det.center_y + det.height_px / 2,
+                    }));
+                }
+
+                // 5. Risk level (use risk_level if present)
+                const riskLevel = data.risk_level || data.riskLevel || "";
+
+                // 6. Summary and recommendation
+                const summary = data.summary || "";
+                const recommendation = data.recommendation || "";
+
                 const payload: ResultType = {
                     id: snap.id,
                     userId: data.userId || "",
                     userEmail: data.userEmail || "",
                     patientName: data.patientName || "Unknown",
-                    prediction: data.prediction || "Unknown",
-                    confidence: typeof data.confidence === "number" ? data.confidence : 0,
-                    boxes: Array.isArray(data.boxes) ? data.boxes : [],
+                    prediction: prediction,
+                    confidence: confidenceNormalized,
+                    boxes: boxes,
                     originalImageBase64: data.originalImageBase64 || "",
                     annotatedImageBase64: data.annotatedImageBase64 || "",
                     gradCamBase64: data.gradCamBase64 || "",
-                    riskLevel: data.riskLevel || "",
+                    riskLevel: riskLevel,
                     modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
-                    summary: data.summary || "",
-                    recommendation: data.recommendation || "",
-                    createdAt: data.createdAt || null,
+                    summary: summary,
+                    recommendation: recommendation,
+                    createdAt: createdAt,
                 };
 
                 setResult(payload);
@@ -214,20 +248,9 @@ export default function ReportPage() {
 
     const safeBoxes = useMemo(() => normalizeBoxes(result?.boxes), [result]);
 
-    const originalSrc = useMemo(
-        () => getImageSrc(result?.originalImageBase64),
-        [result]
-    );
-
-    const annotatedSrc = useMemo(
-        () => getImageSrc(result?.annotatedImageBase64),
-        [result]
-    );
-
-    const gradCamSrc = useMemo(
-        () => getImageSrc(result?.gradCamBase64),
-        [result]
-    );
+    const originalSrc = useMemo(() => getImageSrc(result?.originalImageBase64), [result]);
+    const annotatedSrc = useMemo(() => getImageSrc(result?.annotatedImageBase64), [result]);
+    const gradCamSrc = useMemo(() => getImageSrc(result?.gradCamBase64), [result]);
 
     const reportDate = useMemo(() => formatDate(result?.createdAt), [result]);
 
@@ -315,6 +338,7 @@ export default function ReportPage() {
             </div>
 
             <div className="max-w-6xl mx-auto mt-8 bg-white p-5 sm:p-8 rounded-[28px] shadow-[var(--shadow-card)] print:shadow-none print:rounded-none print:p-0">
+                {/* Header */}
                 <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] pb-6">
                     <div className="flex items-center gap-3">
                         <img src="/logo.png" className="w-12 h-12" alt="MEDORA" />
@@ -336,6 +360,7 @@ export default function ReportPage() {
                     </div>
                 </div>
 
+                {/* Stats */}
                 <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
                     <ReportStat
                         icon={<FileText className="h-5 w-5" />}
@@ -365,12 +390,13 @@ export default function ReportPage() {
                             riskLevel === "High"
                                 ? "text-red-600"
                                 : riskLevel === "Moderate"
-                                    ? "text-amber-600"
-                                    : "text-emerald-600"
+                                ? "text-amber-600"
+                                : "text-emerald-600"
                         }
                     />
                 </div>
 
+                {/* Images */}
                 <div className="grid lg:grid-cols-3 gap-6 mt-8">
                     <ReportImageCard
                         title="Uploaded Radiograph"
@@ -418,6 +444,7 @@ export default function ReportPage() {
                     />
                 </div>
 
+                {/* AI Summary + Technical Details */}
                 <div className="grid lg:grid-cols-2 gap-6 mt-8">
                     <div className="rounded-2xl bg-[var(--card)] p-5">
                         <div className="flex items-center gap-2">
@@ -479,6 +506,7 @@ export default function ReportPage() {
                     </div>
                 </div>
 
+                {/* Bounding Box Coordinates */}
                 <div className="mt-8 rounded-2xl bg-[var(--card)] p-5">
                     <h3 className="text-lg font-bold text-[var(--foreground)]">
                         Detected Region Coordinates
@@ -511,6 +539,7 @@ export default function ReportPage() {
                     )}
                 </div>
 
+                {/* Action Buttons */}
                 <div className="mt-8 flex flex-col sm:flex-row gap-4 print:hidden">
                     <button
                         onClick={downloadReport}
@@ -533,6 +562,7 @@ export default function ReportPage() {
     );
 }
 
+// ----- UI components (unchanged) -----
 function ReportStat({
     icon,
     label,
@@ -557,18 +587,10 @@ function ReportStat({
     );
 }
 
-function ReportImageCard({
-    title,
-    content,
-}: {
-    title: string;
-    content: React.ReactNode;
-}) {
+function ReportImageCard({ title, content }: { title: string; content: React.ReactNode }) {
     return (
         <div className="rounded-2xl bg-[var(--card)] p-4">
-            <h3 className="text-sm font-medium text-[var(--text-soft)] mb-3">
-                {title}
-            </h3>
+            <h3 className="text-sm font-medium text-[var(--text-soft)] mb-3">{title}</h3>
             {content}
         </div>
     );
@@ -595,7 +617,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 function MiniCoord({ label, value }: { label: string; value: number }) {
     const safeValue = Number.isFinite(value) ? value : 0;
-
     return (
         <div className="rounded-lg bg-[var(--background)] border border-[var(--border)] px-3 py-2">
             <p className="text-xs text-[var(--text-soft)]">{label}</p>
