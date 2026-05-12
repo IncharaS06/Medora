@@ -11,7 +11,6 @@ import {
     query,
     limit,
     where,
-    orderBy,
 } from "firebase/firestore";
 
 import {
@@ -96,9 +95,6 @@ function getReadableFirestoreError(err: any) {
     if (code.includes("permission-denied")) {
         return "Permission denied. Check Firestore rules.";
     }
-    if (code.includes("failed-precondition")) {
-        return "Missing Firestore index. Create the required index.";
-    }
     return "Failed to load analysis result.";
 }
 
@@ -127,23 +123,22 @@ export default function ResultsPage() {
             setError("");
             setRefreshing(true);
 
-            // First try with userId
+            // Query without orderBy to avoid composite index requirement
+            // Fetch a reasonable number of documents and sort client-side
             let q = query(
                 collection(db, "cases"),
                 where("userId", "==", firebaseUser.uid),
-                orderBy("timestamp", "desc"),
-                limit(1)
+                limit(20) // fetch enough to get the latest
             );
             let snap = await getDocs(q);
 
-            // If no results, try userEmail
+            // Fallback to userEmail if no results
             if (snap.empty && firebaseUser.email) {
                 console.warn("No cases with userId, trying userEmail");
                 q = query(
                     collection(db, "cases"),
                     where("userEmail", "==", firebaseUser.email),
-                    orderBy("timestamp", "desc"),
-                    limit(1)
+                    limit(20)
                 );
                 snap = await getDocs(q);
             }
@@ -154,50 +149,59 @@ export default function ResultsPage() {
                 return;
             }
 
-            const docSnap = snap.docs[0];
-            const data = docSnap.data();
+            // Convert all docs to ResultType
+            const items: ResultType[] = snap.docs.map((doc) => {
+                const data = doc.data();
+                const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
+                const stage2 = data.stage2_yolo as StageYOLO | undefined;
 
-            const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
-            const stage2 = data.stage2_yolo as StageYOLO | undefined;
+                let detections: DetectionType[] = [];
+                if (Array.isArray(data.detections)) {
+                    detections = data.detections;
+                } else if (stage2?.detections && Array.isArray(stage2.detections)) {
+                    detections = stage2.detections;
+                }
 
-            let detections: DetectionType[] = [];
-            if (Array.isArray(data.detections)) {
-                detections = data.detections;
-            } else if (stage2?.detections && Array.isArray(stage2.detections)) {
-                detections = stage2.detections;
-            }
+                const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
+                const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
 
-            const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
-            const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
+                return {
+                    id: doc.id,
+                    case_id: data.case_id || "",
+                    filename: data.filename || "",
+                    aspect_ratio: data.aspect_ratio || "",
+                    final_result: data.final_result || "Unknown",
+                    fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
+                    normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
+                    risk_level: data.risk_level || "Unknown",
+                    severity: data.severity || "",
+                    detections: detections,
+                    detections_count: detectionsCount,
+                    image_width: typeof data.image_width === "number" ? data.image_width : 0,
+                    image_height: typeof data.image_height === "number" ? data.image_height : 0,
+                    recommendation: data.recommendation || "",
+                    summary: data.summary || "",
+                    timestamp: data.timestamp || "",
+                    yolo_confidence: yoloConfidence,
+                    file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
+                    is_fracture: Boolean(data.is_fracture),
+                    originalImageBase64: data.originalImageBase64 || "",
+                    annotatedImageBase64: data.annotatedImageBase64 || "",
+                    gradCamBase64: data.gradCamBase64 || "",
+                    stage1_efficientnet: stage1,
+                    stage2_yolo: stage2,
+                };
+            });
 
-            const payload: ResultType = {
-                id: docSnap.id,
-                case_id: data.case_id || "",
-                filename: data.filename || "",
-                aspect_ratio: data.aspect_ratio || "",
-                final_result: data.final_result || "Unknown",
-                fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
-                normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
-                risk_level: data.risk_level || "Unknown",
-                severity: data.severity || "",
-                detections: detections,
-                detections_count: detectionsCount,
-                image_width: typeof data.image_width === "number" ? data.image_width : 0,
-                image_height: typeof data.image_height === "number" ? data.image_height : 0,
-                recommendation: data.recommendation || "",
-                summary: data.summary || "",
-                timestamp: data.timestamp || "",
-                yolo_confidence: yoloConfidence,
-                file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
-                is_fracture: Boolean(data.is_fracture),
-                originalImageBase64: data.originalImageBase64 || "",
-                annotatedImageBase64: data.annotatedImageBase64 || "",
-                gradCamBase64: data.gradCamBase64 || "",
-                stage1_efficientnet: stage1,
-                stage2_yolo: stage2,
-            };
+            // Sort client-side by timestamp descending (most recent first)
+            items.sort((a, b) => {
+                const aTime = a.timestamp || "";
+                const bTime = b.timestamp || "";
+                return bTime.localeCompare(aTime);
+            });
 
-            setResult(payload);
+            const latest = items[0] || null;
+            setResult(latest);
         } catch (err) {
             console.error("Fetch error:", err);
             setError(getReadableFirestoreError(err));
@@ -282,6 +286,7 @@ export default function ResultsPage() {
             </div>
 
             <div className="max-w-7xl mx-auto mt-8 bg-white rounded-[30px] p-6 sm:p-8 shadow-[var(--shadow-card)]">
+                {/* Header */}
                 <div>
                     <h2 className="text-3xl font-bold text-[var(--foreground)]">
                         Pediatric Wrist Fracture Analysis
@@ -291,7 +296,7 @@ export default function ResultsPage() {
                     </p>
                 </div>
 
-                {/* SUMMARY CARDS */}
+                {/* Summary Cards */}
                 <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-8">
                     <SummaryCard
                         icon={<Activity className="w-5 h-5" />}
@@ -323,14 +328,14 @@ export default function ResultsPage() {
                     />
                 </div>
 
-                {/* SEVERITY */}
+                {/* Severity Warning */}
                 {result.severity && (
                     <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">
                         ⚠️ {result.severity}
                     </div>
                 )}
 
-                {/* IMAGES */}
+                {/* Images */}
                 <div className="grid lg:grid-cols-3 gap-6 mt-8">
                     <ImagePanel
                         title="Uploaded Image"
@@ -364,7 +369,7 @@ export default function ResultsPage() {
                     />
                 </div>
 
-                {/* AI INTERPRETATION + TECHNICAL DETAILS */}
+                {/* AI Interpretation + Technical Details */}
                 <div className="grid lg:grid-cols-2 gap-6 mt-8">
                     <div className="rounded-3xl bg-[var(--card)] p-6">
                         <div className="flex items-center gap-2">
@@ -422,7 +427,7 @@ export default function ResultsPage() {
                     </div>
                 </div>
 
-                {/* DETECTION DETAILS */}
+                {/* Detection Details */}
                 <div className="mt-8 rounded-3xl bg-[var(--card)] p-6">
                     <h3 className="text-xl font-bold text-[var(--foreground)]">Detection Details</h3>
                     {detections.length > 0 ? (
@@ -455,7 +460,7 @@ export default function ResultsPage() {
                     )}
                 </div>
 
-                {/* ACTIONS */}
+                {/* Actions */}
                 <div className="flex flex-col sm:flex-row gap-4 mt-8">
                     <button onClick={() => router.push("/upload")} className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium">
                         Analyze Another
@@ -469,7 +474,7 @@ export default function ResultsPage() {
     );
 }
 
-// ---------- UI Components (unchanged) ----------
+// UI Components (unchanged)
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return (
         <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5">
