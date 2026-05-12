@@ -10,7 +10,7 @@ import {
     getDocs,
     query,
     limit,
-    where,
+    orderBy,
 } from "firebase/firestore";
 
 import {
@@ -118,30 +118,20 @@ export default function ResultsPage() {
     }, [router]);
 
     const fetchLatestResult = async () => {
-        if (!firebaseUser) return;
         try {
             setError("");
             setRefreshing(true);
 
-            // Query without orderBy to avoid composite index requirement
-            // Fetch a reasonable number of documents and sort client-side
-            let q = query(
+            // Simple query: get the most recent case by timestamp (descending)
+            // Assumes only this user's cases exist in the collection.
+            // If you have multiple users, you must add a userId field to each case document.
+            const q = query(
                 collection(db, "cases"),
-                where("userId", "==", firebaseUser.uid),
-                limit(20) // fetch enough to get the latest
+                orderBy("timestamp", "desc"),
+                limit(1)
             );
-            let snap = await getDocs(q);
 
-            // Fallback to userEmail if no results
-            if (snap.empty && firebaseUser.email) {
-                console.warn("No cases with userId, trying userEmail");
-                q = query(
-                    collection(db, "cases"),
-                    where("userEmail", "==", firebaseUser.email),
-                    limit(20)
-                );
-                snap = await getDocs(q);
-            }
+            const snap = await getDocs(q);
 
             if (snap.empty) {
                 setError("No analysis result found. Please upload a scan first.");
@@ -149,59 +139,50 @@ export default function ResultsPage() {
                 return;
             }
 
-            // Convert all docs to ResultType
-            const items: ResultType[] = snap.docs.map((doc) => {
-                const data = doc.data();
-                const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
-                const stage2 = data.stage2_yolo as StageYOLO | undefined;
+            const docSnap = snap.docs[0];
+            const data = docSnap.data();
 
-                let detections: DetectionType[] = [];
-                if (Array.isArray(data.detections)) {
-                    detections = data.detections;
-                } else if (stage2?.detections && Array.isArray(stage2.detections)) {
-                    detections = stage2.detections;
-                }
+            const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
+            const stage2 = data.stage2_yolo as StageYOLO | undefined;
 
-                const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
-                const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
+            let detections: DetectionType[] = [];
+            if (Array.isArray(data.detections)) {
+                detections = data.detections;
+            } else if (stage2?.detections && Array.isArray(stage2.detections)) {
+                detections = stage2.detections;
+            }
 
-                return {
-                    id: doc.id,
-                    case_id: data.case_id || "",
-                    filename: data.filename || "",
-                    aspect_ratio: data.aspect_ratio || "",
-                    final_result: data.final_result || "Unknown",
-                    fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
-                    normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
-                    risk_level: data.risk_level || "Unknown",
-                    severity: data.severity || "",
-                    detections: detections,
-                    detections_count: detectionsCount,
-                    image_width: typeof data.image_width === "number" ? data.image_width : 0,
-                    image_height: typeof data.image_height === "number" ? data.image_height : 0,
-                    recommendation: data.recommendation || "",
-                    summary: data.summary || "",
-                    timestamp: data.timestamp || "",
-                    yolo_confidence: yoloConfidence,
-                    file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
-                    is_fracture: Boolean(data.is_fracture),
-                    originalImageBase64: data.originalImageBase64 || "",
-                    annotatedImageBase64: data.annotatedImageBase64 || "",
-                    gradCamBase64: data.gradCamBase64 || "",
-                    stage1_efficientnet: stage1,
-                    stage2_yolo: stage2,
-                };
-            });
+            const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
+            const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
 
-            // Sort client-side by timestamp descending (most recent first)
-            items.sort((a, b) => {
-                const aTime = a.timestamp || "";
-                const bTime = b.timestamp || "";
-                return bTime.localeCompare(aTime);
-            });
+            const payload: ResultType = {
+                id: docSnap.id,
+                case_id: data.case_id || "",
+                filename: data.filename || "",
+                aspect_ratio: data.aspect_ratio || "",
+                final_result: data.final_result || "Unknown",
+                fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
+                normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
+                risk_level: data.risk_level || "Unknown",
+                severity: data.severity || "",
+                detections: detections,
+                detections_count: detectionsCount,
+                image_width: typeof data.image_width === "number" ? data.image_width : 0,
+                image_height: typeof data.image_height === "number" ? data.image_height : 0,
+                recommendation: data.recommendation || "",
+                summary: data.summary || "",
+                timestamp: data.timestamp || "",
+                yolo_confidence: yoloConfidence,
+                file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
+                is_fracture: Boolean(data.is_fracture),
+                originalImageBase64: data.originalImageBase64 || "",
+                annotatedImageBase64: data.annotatedImageBase64 || "",
+                gradCamBase64: data.gradCamBase64 || "",
+                stage1_efficientnet: stage1,
+                stage2_yolo: stage2,
+            };
 
-            const latest = items[0] || null;
-            setResult(latest);
+            setResult(payload);
         } catch (err) {
             console.error("Fetch error:", err);
             setError(getReadableFirestoreError(err));
@@ -214,7 +195,7 @@ export default function ResultsPage() {
 
     useEffect(() => {
         fetchLatestResult();
-    }, [firebaseUser]);
+    }, []); // Only runs once on mount, not dependent on firebaseUser
 
     const originalSrc = useMemo(() => getImageSrc(result?.originalImageBase64), [result]);
     const annotatedSrc = useMemo(() => getImageSrc(result?.annotatedImageBase64), [result]);
