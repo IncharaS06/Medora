@@ -36,31 +36,35 @@ import {
     Cell,
 } from "recharts";
 
-type BoxType =
-    | {
-        x1?: number;
-        y1?: number;
-        x2?: number;
-        y2?: number;
-    }
-    | number[];
+// Type for boxes (compatible with existing UI)
+type BoxType = {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+};
 
+// Updated CaseItem to include both original and transformed fields
 type CaseItem = {
     id: string;
     userId?: string;
     userEmail?: string;
     patientName?: string;
-    prediction?: string;
-    confidence?: number;
+    prediction?: string;          // from final_result
+    confidence?: number;          // normalized 0-1 from fracture_probability
     createdAt?: Timestamp | string | null;
     originalImageBase64?: string;
     annotatedImageBase64?: string;
     gradCamBase64?: string;
-    riskLevel?: string;
+    riskLevel?: string;           // from risk_level
     modelName?: string;
     summary?: string;
     recommendation?: string;
-    boxes?: BoxType[];
+    boxes?: BoxType[];            // converted from detections
+    // optional raw fields for debugging
+    fractureProbabilityRaw?: number;
+    detectionsRaw?: any[];
+    filename?: string;
 };
 
 export default function HistoryPage() {
@@ -99,10 +103,72 @@ export default function HistoryPage() {
         const unsubscribe = onSnapshot(
             q,
             (snapshot) => {
-                const fetchedCases: CaseItem[] = snapshot.docs.map((doc) => ({
-                    id: doc.id,
-                    ...(doc.data() as Omit<CaseItem, "id">),
-                }));
+                const fetchedCases: CaseItem[] = snapshot.docs.map((doc) => {
+                    const data = doc.data();
+
+                    // ---- Map and transform fields ----
+                    // 1. prediction from final_result
+                    const rawResult = data.final_result || "Unknown";
+                    const prediction =
+                        rawResult.toLowerCase() === "fracture"
+                            ? "Fracture"
+                            : rawResult.toLowerCase() === "normal"
+                            ? "Normal"
+                            : "Unknown";
+
+                    // 2. confidence: fracture_probability (0-100) -> 0-1
+                    const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
+                    const confidenceNormalized = fractureProb / 100;
+
+                    // 3. parse createdAt: could be Firestore Timestamp or string "2026-05-12 05:53:16"
+                    let createdAt = data.createdAt || data.timestamp || null;
+                    if (typeof createdAt === "string") {
+                        const parsed = new Date(createdAt.replace(" ", "T"));
+                        createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
+                    }
+
+                    // 4. convert detections array to boxes (x1,y1,x2,y2)
+                    let boxes: BoxType[] = [];
+                    const detections = data.detections;
+                    if (Array.isArray(detections)) {
+                        boxes = detections.map((det: any) => {
+                            const cx = Number(det.center_x);
+                            const cy = Number(det.center_y);
+                            const w = Number(det.width_px);
+                            const h = Number(det.height_px);
+                            return {
+                                x1: cx - w / 2,
+                                y1: cy - h / 2,
+                                x2: cx + w / 2,
+                                y2: cy + h / 2,
+                            };
+                        });
+                    }
+
+                    // 5. risk level
+                    const riskLevel = data.risk_level || data.riskLevel || "";
+
+                    return {
+                        id: doc.id,
+                        userId: data.userId || "",
+                        userEmail: data.userEmail || "",
+                        patientName: data.patientName || "Unknown",
+                        prediction: prediction,
+                        confidence: confidenceNormalized,
+                        createdAt: createdAt,
+                        originalImageBase64: data.originalImageBase64 || "",
+                        annotatedImageBase64: data.annotatedImageBase64 || "",
+                        gradCamBase64: data.gradCamBase64 || "",
+                        riskLevel: riskLevel,
+                        modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
+                        summary: data.summary || "",
+                        recommendation: data.recommendation || "",
+                        boxes: boxes,
+                        fractureProbabilityRaw: fractureProb,
+                        detectionsRaw: detections,
+                        filename: data.filename || "",
+                    };
+                });
 
                 setCases(fetchedCases);
                 setLoading(false);
@@ -122,7 +188,7 @@ export default function HistoryPage() {
         if (!value) return "—";
 
         if (typeof value === "string") {
-            const date = new Date(value);
+            const date = new Date(value.replace(" ", "T"));
             if (isNaN(date.getTime())) return "—";
             return date.toLocaleDateString();
         }
@@ -165,10 +231,7 @@ export default function HistoryPage() {
         ).length;
         const avgConfidence =
             total > 0
-                ? (
-                    filteredCases.reduce((sum, c) => sum + Number(c.confidence || 0), 0) /
-                    total
-                ) * 100
+                ? (filteredCases.reduce((sum, c) => sum + (c.confidence || 0) * 100, 0) / total)
                 : 0;
 
         return {
@@ -259,28 +322,31 @@ export default function HistoryPage() {
                     <Filter className="h-4 w-4 text-[var(--primary-dark)] ml-2" />
                     <button
                         onClick={() => setFilter("all")}
-                        className={`rounded-xl px-4 py-2 text-sm font-medium ${filter === "all"
+                        className={`rounded-xl px-4 py-2 text-sm font-medium ${
+                            filter === "all"
                                 ? "bg-[var(--primary-dark)] text-white"
                                 : "text-[var(--foreground)]"
-                            }`}
+                        }`}
                     >
                         All
                     </button>
                     <button
                         onClick={() => setFilter("fracture")}
-                        className={`rounded-xl px-4 py-2 text-sm font-medium ${filter === "fracture"
+                        className={`rounded-xl px-4 py-2 text-sm font-medium ${
+                            filter === "fracture"
                                 ? "bg-red-500 text-white"
                                 : "text-[var(--foreground)]"
-                            }`}
+                        }`}
                     >
                         Fracture
                     </button>
                     <button
                         onClick={() => setFilter("normal")}
-                        className={`rounded-xl px-4 py-2 text-sm font-medium ${filter === "normal"
+                        className={`rounded-xl px-4 py-2 text-sm font-medium ${
+                            filter === "normal"
                                 ? "bg-emerald-500 text-white"
                                 : "text-[var(--foreground)]"
-                            }`}
+                        }`}
                     >
                         Normal
                     </button>
@@ -425,12 +491,13 @@ export default function HistoryPage() {
                                     </div>
 
                                     <span
-                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${(c.prediction || "").toLowerCase() === "fracture"
+                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                            (c.prediction || "").toLowerCase() === "fracture"
                                                 ? "bg-red-50 text-red-600"
                                                 : (c.prediction || "").toLowerCase() === "normal"
-                                                    ? "bg-emerald-50 text-emerald-600"
-                                                    : "bg-amber-50 text-amber-600"
-                                            }`}
+                                                ? "bg-emerald-50 text-emerald-600"
+                                                : "bg-amber-50 text-amber-600"
+                                        }`}
                                     >
                                         {c.prediction || "Unknown"}
                                     </span>
@@ -482,12 +549,13 @@ export default function HistoryPage() {
 
                                             <td className="p-4">
                                                 <span
-                                                    className={`rounded-full px-3 py-1 text-xs font-semibold ${(c.prediction || "").toLowerCase() === "fracture"
+                                                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                                        (c.prediction || "").toLowerCase() === "fracture"
                                                             ? "bg-red-50 text-red-600"
                                                             : (c.prediction || "").toLowerCase() === "normal"
-                                                                ? "bg-emerald-50 text-emerald-600"
-                                                                : "bg-amber-50 text-amber-600"
-                                                        }`}
+                                                            ? "bg-emerald-50 text-emerald-600"
+                                                            : "bg-amber-50 text-amber-600"
+                                                    }`}
                                                 >
                                                     {c.prediction || "Unknown"}
                                                 </span>
