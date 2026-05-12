@@ -21,6 +21,8 @@ import {
     FileBarChart2,
     ScanLine,
     ShieldAlert,
+    Layers,
+    Target,
 } from "lucide-react";
 
 type DetectionType = {
@@ -33,15 +35,30 @@ type DetectionType = {
     label?: string;
 };
 
+type StageEfficientNet = {
+    confidence_level?: string;
+    fracture_probability?: number;
+    normal_probability?: number;
+};
+
+type StageYOLO = {
+    detections?: DetectionType[];
+    detections_count?: number;
+    max_confidence?: number;
+    ran?: boolean;
+};
+
 type ResultType = {
     id?: string;
     case_id?: string;
     filename?: string;
+    aspect_ratio?: string;
     final_result?: string;
     fracture_probability?: number;
     normal_probability?: number;
     risk_level?: string;
-    detections?: DetectionType[];
+    severity?: string;
+    detections?: DetectionType[];           // top‑level detections (if any)
     detections_count?: number;
     image_width?: number;
     image_height?: number;
@@ -54,6 +71,9 @@ type ResultType = {
     originalImageBase64?: string;
     annotatedImageBase64?: string;
     gradCamBase64?: string;
+    // Two‑stage pipeline fields
+    stage1_efficientnet?: StageEfficientNet;
+    stage2_yolo?: StageYOLO;
 };
 
 function getImageSrc(value?: string) {
@@ -105,11 +125,10 @@ export default function ResultsPage() {
             try {
                 if (!firebaseUser) return;
 
-                // Query without orderBy to avoid index requirement
                 const q = query(
                     collection(db, "cases"),
                     where("userId", "==", firebaseUser.uid),
-                    limit(10) // fetch a few, then sort client-side
+                    limit(10)
                 );
 
                 const snap = await getDocs(q);
@@ -120,30 +139,49 @@ export default function ResultsPage() {
                     return;
                 }
 
-                // Convert all docs to ResultType and sort by timestamp (descending)
                 const items: ResultType[] = snap.docs.map((doc) => {
                     const data = doc.data();
+
+                    // Extract stage1 and stage2 details
+                    const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
+                    const stage2 = data.stage2_yolo as StageYOLO | undefined;
+
+                    // Use top‑level detections if present, otherwise fallback to stage2.detections
+                    let detections: DetectionType[] = [];
+                    if (Array.isArray(data.detections)) {
+                        detections = data.detections;
+                    } else if (stage2?.detections && Array.isArray(stage2.detections)) {
+                        detections = stage2.detections;
+                    }
+
+                    const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
+                    const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
+
                     return {
                         id: doc.id,
                         case_id: data.case_id || "",
                         filename: data.filename || "",
+                        aspect_ratio: data.aspect_ratio || "",
                         final_result: data.final_result || "Unknown",
-                        fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : 0,
-                        normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : 0,
+                        fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
+                        normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
                         risk_level: data.risk_level || "Unknown",
-                        detections: Array.isArray(data.detections) ? data.detections : [],
-                        detections_count: typeof data.detections_count === "number" ? data.detections_count : 0,
+                        severity: data.severity || "",
+                        detections: detections,
+                        detections_count: detectionsCount,
                         image_width: typeof data.image_width === "number" ? data.image_width : 0,
                         image_height: typeof data.image_height === "number" ? data.image_height : 0,
                         recommendation: data.recommendation || "",
                         summary: data.summary || "",
                         timestamp: data.timestamp || "",
-                        yolo_confidence: typeof data.yolo_confidence === "number" ? data.yolo_confidence : 0,
+                        yolo_confidence: yoloConfidence,
                         file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
                         is_fracture: Boolean(data.is_fracture),
                         originalImageBase64: data.originalImageBase64 || "",
                         annotatedImageBase64: data.annotatedImageBase64 || "",
                         gradCamBase64: data.gradCamBase64 || "",
+                        stage1_efficientnet: stage1,
+                        stage2_yolo: stage2,
                     };
                 });
 
@@ -151,7 +189,6 @@ export default function ResultsPage() {
                 items.sort((a, b) => {
                     const aTime = a.timestamp || "";
                     const bTime = b.timestamp || "";
-                    // Lexicographic comparison works for "YYYY-MM-DD HH:MM:SS"
                     return bTime.localeCompare(aTime);
                 });
 
@@ -172,6 +209,9 @@ export default function ResultsPage() {
     const originalSrc = useMemo(() => getImageSrc(result?.originalImageBase64), [result]);
     const annotatedSrc = useMemo(() => getImageSrc(result?.annotatedImageBase64), [result]);
     const gradCamSrc = useMemo(() => getImageSrc(result?.gradCamBase64), [result]);
+
+    // Use detections from state (already merged)
+    const detections = result?.detections || [];
 
     if (loading) {
         return (
@@ -229,7 +269,7 @@ export default function ResultsPage() {
                         Pediatric Wrist Fracture Analysis
                     </h2>
                     <p className="mt-2 text-[var(--text-soft)]">
-                        AI-assisted fracture detection with YOLO localization and explainability.
+                        AI-assisted fracture detection with two‑stage pipeline (EfficientNet‑B3 + YOLOv8).
                     </p>
                 </div>
 
@@ -244,7 +284,7 @@ export default function ResultsPage() {
                     <SummaryCard
                         icon={<FileBarChart2 className="w-5 h-5" />}
                         label="Fracture Probability"
-                        value={`${result.fracture_probability || 0}%`}
+                        value={`${result.fracture_probability?.toFixed(1) ?? 0}%`}
                     />
                     <SummaryCard
                         icon={<AlertTriangle className="w-5 h-5" />}
@@ -264,6 +304,13 @@ export default function ResultsPage() {
                         value={`${result.detections_count || 0}`}
                     />
                 </div>
+
+                {/* SEVERITY (if present) */}
+                {result.severity && (
+                    <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">
+                        ⚠️ {result.severity}
+                    </div>
+                )}
 
                 {/* IMAGES */}
                 <div className="grid lg:grid-cols-3 gap-6 mt-8">
@@ -326,11 +373,25 @@ export default function ResultsPage() {
                             <DetailRow label="Case ID" value={result.case_id || "N/A"} />
                             <DetailRow label="Filename" value={result.filename || "N/A"} />
                             <DetailRow label="Timestamp" value={result.timestamp || "N/A"} />
-                            <DetailRow label="YOLO Confidence" value={`${result.yolo_confidence || 0}%`} />
+                            <DetailRow label="Aspect Ratio" value={result.aspect_ratio || "N/A"} />
                             <DetailRow label="Image Size" value={`${result.image_width} × ${result.image_height}`} />
                             <DetailRow label="File Size" value={`${result.file_size_kb} KB`} />
-                            <DetailRow label="Normal Probability" value={`${result.normal_probability || 0}%`} />
+                            <DetailRow label="Normal Probability" value={`${result.normal_probability?.toFixed(2) ?? 0}%`} />
+                            <DetailRow label="YOLO Max Confidence" value={`${result.yolo_confidence?.toFixed(2) ?? 0}%`} />
                         </div>
+
+                        {/* Two-stage pipeline summary */}
+                        <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
+                            <div className="flex items-center gap-2">
+                                <Layers className="w-4 h-4 text-[var(--primary)]" />
+                                <p className="font-semibold text-sm">Two‑Stage Pipeline</p>
+                            </div>
+                            <div className="mt-3 text-sm text-[var(--text-soft)] space-y-1">
+                                <p>📊 EfficientNet‑B3: {result.stage1_efficientnet?.confidence_level || "N/A"} confidence</p>
+                                <p>🎯 YOLOv8: {result.detections_count} region{result.detections_count !== 1 ? "s" : ""} localized</p>
+                            </div>
+                        </div>
+
                         <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
                             <div className="flex items-center gap-2">
                                 <ShieldAlert className="w-4 h-4 text-[var(--primary)]" />
@@ -343,29 +404,31 @@ export default function ResultsPage() {
                     </div>
                 </div>
 
-                {/* DETECTIONS */}
+                {/* DETECTION DETAILS */}
                 <div className="mt-8 rounded-3xl bg-[var(--card)] p-6">
                     <h3 className="text-xl font-bold text-[var(--foreground)]">Detection Details</h3>
-                    {result.detections && result.detections.length > 0 ? (
+                    {detections.length > 0 ? (
                         <div className="mt-5 grid gap-4">
-                            {result.detections.map((det, index) => (
+                            {detections.map((det, index) => (
                                 <div key={index} className="bg-white rounded-2xl border border-[var(--border)] p-5">
                                     <div className="flex items-center justify-between flex-wrap gap-3">
-                                        <h4 className="font-bold text-[var(--primary-dark)]">Detection {index + 1}</h4>
-                                        <span className="text-sm font-semibold text-red-600">{det.confidence || 0}%</span>
+                                        <h4 className="font-bold text-[var(--primary-dark)]">Region {index + 1}</h4>
+                                        <span className="text-sm font-semibold text-red-600">{det.confidence?.toFixed(2) || 0}%</span>
                                     </div>
                                     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-                                        <MiniDetail label="Center X" value={`${det.center_x || 0}`} />
-                                        <MiniDetail label="Center Y" value={`${det.center_y || 0}`} />
-                                        <MiniDetail label="Width" value={`${det.width_px || 0}px`} />
-                                        <MiniDetail label="Height" value={`${det.height_px || 0}px`} />
+                                        <MiniDetail label="Center X" value={`${det.center_x ?? 0}`} />
+                                        <MiniDetail label="Center Y" value={`${det.center_y ?? 0}`} />
+                                        <MiniDetail label="Width" value={`${det.width_px ?? 0}px`} />
+                                        <MiniDetail label="Height" value={`${det.height_px ?? 0}px`} />
                                     </div>
-                                    <div className="mt-4 rounded-xl bg-[var(--background)] border border-[var(--border)] p-4">
-                                        <p className="text-xs text-[var(--text-soft)]">Bounding Box</p>
-                                        <p className="mt-1 text-sm font-medium break-all">
-                                            {Array.isArray(det.bbox) ? `[${det.bbox.join(", ")}]` : "N/A"}
-                                        </p>
-                                    </div>
+                                    {det.bbox && (
+                                        <div className="mt-4 rounded-xl bg-[var(--background)] border border-[var(--border)] p-4">
+                                            <p className="text-xs text-[var(--text-soft)]">Bounding Box</p>
+                                            <p className="mt-1 text-sm font-medium break-all">
+                                                [{det.bbox.join(", ")}]
+                                            </p>
+                                        </div>
+                                    )}
                                 </div>
                             ))}
                         </div>
