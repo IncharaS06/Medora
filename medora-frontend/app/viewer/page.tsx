@@ -26,11 +26,11 @@ import {
 
 type RawBoxType =
     | {
-        x1?: number;
-        y1?: number;
-        x2?: number;
-        y2?: number;
-    }
+          x1?: number;
+          y1?: number;
+          x2?: number;
+          y2?: number;
+      }
     | number[];
 
 type BoxType = {
@@ -45,13 +45,13 @@ type ResultType = {
     userId?: string;
     userEmail?: string;
     patientName?: string;
-    prediction: string;
-    confidence: number;
-    boxes?: RawBoxType[];
+    prediction: string;          // from final_result
+    confidence: number;          // normalized 0-1 from fracture_probability
+    boxes?: RawBoxType[];        // converted from detections
     originalImageBase64?: string;
     annotatedImageBase64?: string;
     gradCamBase64?: string;
-    riskLevel?: string;
+    riskLevel?: string;          // from risk_level
     modelName?: string;
     summary?: string;
     recommendation?: string;
@@ -73,7 +73,6 @@ function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
                     y2: Number(box[3] ?? 0),
                 };
             }
-
             return {
                 x1: Number(box?.x1 ?? 0),
                 y1: Number(box?.y1 ?? 0),
@@ -92,41 +91,32 @@ function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
 
 function getImageSrc(value?: string) {
     if (!value) return "";
-
     const trimmed = value.trim();
     if (!trimmed) return "";
-
     if (trimmed.startsWith("data:image/")) return trimmed;
-
     const looksLikeBase64 =
         trimmed.length > 100 &&
         !trimmed.includes("http://") &&
         !trimmed.includes("https://") &&
         !trimmed.includes("\\") &&
         !trimmed.includes(" ");
-
     if (looksLikeBase64) {
         return `data:image/jpeg;base64,${trimmed}`;
     }
-
     return "";
 }
 
 function getReadableFirestoreError(err: any) {
     const code = err?.code || "";
-
     if (code.includes("permission-denied")) {
         return "Permission denied while reading Firestore data. Check Firestore rules.";
     }
-
     if (code.includes("failed-precondition")) {
         return "Firestore index or query requirement not satisfied. Create the required composite index for userId + createdAt.";
     }
-
     if (code.includes("unavailable")) {
         return "Firestore is temporarily unavailable.";
     }
-
     return "Failed to load viewer data from database.";
 }
 
@@ -148,7 +138,6 @@ export default function ViewerPage() {
             }
             setFirebaseUser(user);
         });
-
         return () => unsub();
     }, [router]);
 
@@ -173,24 +162,67 @@ export default function ViewerPage() {
                 }
 
                 const docSnap = snap.docs[0];
-                const data = docSnap.data() as Omit<ResultType, "id">;
+                const data = docSnap.data();
+
+                // --- Transform backend fields to UI expected fields ---
+                // 1. prediction from final_result
+                const rawResult = data.final_result || "Unknown";
+                const prediction =
+                    rawResult.toLowerCase() === "fracture"
+                        ? "Fracture"
+                        : rawResult.toLowerCase() === "normal"
+                        ? "Normal"
+                        : "Unknown";
+
+                // 2. confidence from fracture_probability (0-100) -> 0-1
+                const fractureProb =
+                    typeof data.fracture_probability === "number"
+                        ? data.fracture_probability
+                        : 0;
+                const confidence = fractureProb / 100;
+
+                // 3. parse createdAt (could be string "2026-05-12 05:53:16" or Timestamp)
+                let createdAt = data.createdAt || data.timestamp || null;
+                if (typeof createdAt === "string") {
+                    const parsed = new Date(createdAt.replace(" ", "T"));
+                    createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
+                }
+
+                // 4. convert detections to boxes
+                let boxes: RawBoxType[] = [];
+                const detections = data.detections;
+                if (Array.isArray(detections)) {
+                    boxes = detections.map((det: any) => ({
+                        x1: det.center_x - det.width_px / 2,
+                        y1: det.center_y - det.height_px / 2,
+                        x2: det.center_x + det.width_px / 2,
+                        y2: det.center_y + det.height_px / 2,
+                    }));
+                }
+
+                // 5. risk level
+                const riskLevel = data.risk_level || data.riskLevel || "";
+
+                // 6. summary & recommendation
+                const summary = data.summary || "";
+                const recommendation = data.recommendation || "";
 
                 const payload: ResultType = {
                     id: docSnap.id,
                     userId: data.userId || "",
                     userEmail: data.userEmail || "",
                     patientName: data.patientName || "Unknown",
-                    prediction: data.prediction || "Unknown",
-                    confidence: typeof data.confidence === "number" ? data.confidence : 0,
-                    boxes: Array.isArray(data.boxes) ? data.boxes : [],
+                    prediction,
+                    confidence,
+                    boxes,
                     originalImageBase64: data.originalImageBase64 || "",
                     annotatedImageBase64: data.annotatedImageBase64 || "",
                     gradCamBase64: data.gradCamBase64 || "",
-                    riskLevel: data.riskLevel || "",
+                    riskLevel,
                     modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
-                    summary: data.summary || "",
-                    recommendation: data.recommendation || "",
-                    createdAt: data.createdAt || null,
+                    summary,
+                    recommendation,
+                    createdAt,
                 };
 
                 setResult(payload);
@@ -274,8 +306,8 @@ export default function ViewerPage() {
         (result.confidence >= 0.8
             ? "High"
             : result.confidence >= 0.5
-                ? "Moderate"
-                : "Low");
+            ? "Moderate"
+            : "Low");
 
     return (
         <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
@@ -316,10 +348,11 @@ export default function ViewerPage() {
                         <div className="flex flex-wrap gap-2">
                             <button
                                 onClick={() => setMode("original")}
-                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold border ${mode === "original"
+                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold border ${
+                                    mode === "original"
                                         ? "bg-[var(--primary-dark)] text-white border-[var(--primary-dark)]"
                                         : "bg-white text-[var(--foreground)] border-[var(--border)]"
-                                    }`}
+                                }`}
                             >
                                 <ImageIcon className="h-4 w-4" />
                                 Original
@@ -327,10 +360,11 @@ export default function ViewerPage() {
 
                             <button
                                 onClick={() => setMode("annotated")}
-                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold border ${mode === "annotated"
+                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold border ${
+                                    mode === "annotated"
                                         ? "bg-[var(--primary-dark)] text-white border-[var(--primary-dark)]"
                                         : "bg-white text-[var(--foreground)] border-[var(--border)]"
-                                    }`}
+                                }`}
                             >
                                 <ScanLine className="h-4 w-4" />
                                 Annotated
@@ -339,10 +373,11 @@ export default function ViewerPage() {
                             <button
                                 onClick={() => setMode("gradcam")}
                                 disabled={!gradCamSrc}
-                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold border disabled:opacity-50 ${mode === "gradcam"
+                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold border disabled:opacity-50 ${
+                                    mode === "gradcam"
                                         ? "bg-[var(--primary-dark)] text-white border-[var(--primary-dark)]"
                                         : "bg-white text-[var(--foreground)] border-[var(--border)]"
-                                    }`}
+                                }`}
                             >
                                 <Flame className="h-4 w-4" />
                                 Grad-CAM
@@ -460,8 +495,8 @@ export default function ViewerPage() {
                                 computedRisk === "High"
                                     ? "text-red-600"
                                     : computedRisk === "Moderate"
-                                        ? "text-amber-600"
-                                        : "text-emerald-600"
+                                    ? "text-amber-600"
+                                    : "text-emerald-600"
                             }
                         />
                     </div>
@@ -499,10 +534,10 @@ export default function ViewerPage() {
 
                     <div className="mt-6 flex flex-col gap-3">
                         <button
-                            onClick={() => router.push("/results")}
+                            onClick={() => router.push("/history")}
                             className="rounded-xl bg-[var(--primary-dark)] px-4 py-3 text-white font-semibold hover:bg-[var(--primary)]"
                         >
-                            Back to Results
+                            Back to History
                         </button>
 
                         <button
