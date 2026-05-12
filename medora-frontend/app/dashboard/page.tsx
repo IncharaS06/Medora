@@ -46,28 +46,37 @@ import {
   Cell,
 } from "recharts";
 
+// Updated type to match your actual Firestore data structure
 type CaseItem = {
   id: string;
   userId?: string;
   userEmail?: string;
   patientName?: string;
-  prediction?: string;
-  confidence?: number;
+  // Core analysis fields
+  prediction: string;           // from final_result ("Fracture" / "Normal")
+  confidence: number;           // from fracture_probability (0-100) stored as 0-1 later
   createdAt?: Timestamp | string | null;
   status?: string;
-  riskLevel?: string;
+  riskLevel?: string;           // from risk_level
   annotatedImageBase64?: string;
   gradCamBase64?: string;
   originalImageBase64?: string;
   modelName?: string;
-  summary?: string;
-  recommendation?: string;
-  boxes?: {
+  summary?: string;             // from summary
+  recommendation?: string;      // from recommendation
+  // Detection boxes (converted from YOLO center/width/height)
+  boxes: {
     x1: number;
     y1: number;
     x2: number;
     y2: number;
   }[];
+  // Additional raw fields you might want to keep
+  rawDetections?: any[];
+  fractureProbability?: number;
+  normalProbability?: number;
+  yoloConfidence?: number;
+  filename?: string;
 };
 
 export default function DashboardPage() {
@@ -114,24 +123,62 @@ export default function DashboardPage() {
           snapshot.docs.forEach((docSnap) => {
             const data = docSnap.data() as DocumentData;
 
+            // Convert detections array (center_x, center_y, width_px, height_px) to boxes (x1,y1,x2,y2)
+            let boxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
+            const detections = data.detections || [];
+            if (Array.isArray(detections)) {
+              boxes = detections.map((det: any) => {
+                const cx = Number(det.center_x);
+                const cy = Number(det.center_y);
+                const w = Number(det.width_px);
+                const h = Number(det.height_px);
+                return {
+                  x1: cx - w / 2,
+                  y1: cy - h / 2,
+                  x2: cx + w / 2,
+                  y2: cy + h / 2,
+                };
+              });
+            }
+
+            // Handle fracture_probability (0-100) -> convert to 0-1 for internal consistency
+            const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
+            const confidenceNormalized = fractureProb / 100;
+
+            // Determine prediction string from final_result
+            const rawPrediction = (data.final_result || "Unknown").toLowerCase();
+            const prediction = rawPrediction === "fracture" ? "Fracture" : rawPrediction === "normal" ? "Normal" : "Unknown";
+
+            // Parse createdAt - could be Firestore Timestamp or string like "2026-05-12 05:53:16"
+            let createdAt = data.createdAt || data.timestamp || null;
+            if (typeof createdAt === "string") {
+              // Try to parse "2026-05-12 05:53:16" into a Date object
+              const parsed = new Date(createdAt.replace(" ", "T"));
+              createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
+            }
+
             uniqueMap.set(docSnap.id, {
               id: docSnap.id,
               userId: data.userId || "",
               userEmail: data.userEmail || "",
               patientName: data.patientName || "Unknown",
-              prediction: data.prediction || "Unknown",
-              confidence:
-                typeof data.confidence === "number" ? data.confidence : 0,
-              createdAt: data.createdAt || null,
+              prediction: prediction,
+              confidence: confidenceNormalized,
+              createdAt: createdAt,
               status: data.status || "Completed",
-              riskLevel: data.riskLevel || "",
+              riskLevel: data.risk_level || data.riskLevel || "",
               annotatedImageBase64: data.annotatedImageBase64 || "",
               gradCamBase64: data.gradCamBase64 || "",
               originalImageBase64: data.originalImageBase64 || "",
               modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
               summary: data.summary || "",
               recommendation: data.recommendation || "",
-              boxes: Array.isArray(data.boxes) ? data.boxes : [],
+              boxes: boxes,
+              rawDetections: detections,
+              fractureProbability: fractureProb,
+              normalProbability: typeof data.normal_probability === "number" ? data.normal_probability : 0,
+              yoloConfidence: typeof data.yolo_confidence === "number" ? data.yolo_confidence : undefined,
+              filename: data.filename || "",
             });
           });
 
@@ -168,11 +215,11 @@ export default function DashboardPage() {
     const total = cases.length;
 
     const fractures = cases.filter(
-      (item) => (item.prediction || "").toLowerCase() === "fracture"
+      (item) => item.prediction.toLowerCase() === "fracture"
     ).length;
 
     const normal = cases.filter(
-      (item) => (item.prediction || "").toLowerCase() === "normal"
+      (item) => item.prediction.toLowerCase() === "normal"
     ).length;
 
     const pending = cases.filter((item) => {
@@ -186,10 +233,7 @@ export default function DashboardPage() {
 
     const avgConfidence =
       total > 0
-        ? (
-          cases.reduce((sum, item) => sum + Number(item.confidence || 0), 0) /
-          total
-        ) * 100
+        ? (cases.reduce((sum, item) => sum + (item.confidence * 100), 0) / total)
         : 0;
 
     return {
@@ -225,7 +269,7 @@ export default function DashboardPage() {
       }
 
       const row = map.get(monthKey)!;
-      const prediction = (item.prediction || "").toLowerCase();
+      const prediction = item.prediction.toLowerCase();
       const status = (item.status || "").toLowerCase();
 
       if (prediction === "fracture") row.Fracture += 1;
@@ -241,14 +285,13 @@ export default function DashboardPage() {
     });
 
     const result = Array.from(map.values());
-
     return result.length
       ? result.slice(-6)
       : [
-        { name: "Jan", Fracture: 0, Normal: 0, Pending: 0 },
-        { name: "Feb", Fracture: 0, Normal: 0, Pending: 0 },
-        { name: "Mar", Fracture: 0, Normal: 0, Pending: 0 },
-      ];
+          { name: "Jan", Fracture: 0, Normal: 0, Pending: 0 },
+          { name: "Feb", Fracture: 0, Normal: 0, Pending: 0 },
+          { name: "Mar", Fracture: 0, Normal: 0, Pending: 0 },
+        ];
   }, [cases]);
 
   const distributionData = useMemo(
@@ -263,7 +306,7 @@ export default function DashboardPage() {
   const confidenceData = useMemo(() => {
     return recentCases.map((item, index) => ({
       name: `Case ${index + 1}`,
-      confidence: Number(((item.confidence || 0) * 100).toFixed(1)),
+      confidence: Number((item.confidence * 100).toFixed(1)),
     }));
   }, [recentCases]);
 
@@ -271,7 +314,8 @@ export default function DashboardPage() {
     if (!value) return "—";
 
     if (typeof value === "string") {
-      const date = new Date(value);
+      // Try parsing "2026-05-12 05:53:16" format
+      const date = new Date(value.replace(" ", "T"));
       if (isNaN(date.getTime())) return "—";
       return date.toLocaleDateString();
     }
@@ -366,6 +410,7 @@ export default function DashboardPage() {
       </header>
 
       <section className="mx-auto max-w-7xl px-4 py-5 sm:px-6 sm:py-8">
+        {/* Hero + Profile row (unchanged UI) */}
         <div className="grid gap-5 lg:grid-cols-[1.3fr_0.7fr]">
           <div className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[var(--primary)] via-[var(--primary-dark)] to-[#8c7ef1] p-5 text-white shadow-[var(--shadow-soft)] animate-fade-in-up sm:p-8">
             <div className="absolute -right-10 -top-8 h-36 w-36 rounded-full bg-white/10 blur-2xl animate-pulse-slower" />
@@ -457,6 +502,7 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Stat cards */}
         <div className="mt-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
           <StatCard
             title="Total Scans"
@@ -484,6 +530,7 @@ export default function DashboardPage() {
           />
         </div>
 
+        {/* Info strips */}
         <div className="mt-6 grid gap-4 lg:grid-cols-3">
           <InfoStripCard
             title="Total reviewed trend"
@@ -505,6 +552,7 @@ export default function DashboardPage() {
           />
         </div>
 
+        {/* Charts row */}
         <div className="mt-6 grid gap-4 xl:grid-cols-3">
           <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)] xl:col-span-2">
             <div className="mb-4 flex items-center gap-2">
@@ -581,12 +629,13 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* Confidence chart + insight cards */}
         <div className="mt-6 grid gap-4 xl:grid-cols-3">
           <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)] xl:col-span-2">
             <div className="mb-4 flex items-center gap-2">
               <Brain className="h-5 w-5 text-[var(--primary)]" />
               <h3 className="text-lg font-bold text-[var(--foreground)]">
-                Recent Case Confidence
+                Recent Case Confidence (Fracture Probability)
               </h3>
             </div>
 
@@ -617,6 +666,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* Action cards */}
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           <ActionCard
             title="Upload Radiograph"
@@ -638,6 +688,7 @@ export default function DashboardPage() {
           />
         </div>
 
+        {/* Mobile shortcuts */}
         <div className="mt-8 md:hidden">
           <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)]">
             <div className="flex items-center gap-2">
@@ -672,6 +723,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* Recent Cases Table */}
         <div className="mt-8 rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)] sm:p-6">
           <div className="mb-5 flex items-center justify-between gap-4">
             <div>
@@ -691,6 +743,7 @@ export default function DashboardPage() {
             </button>
           </div>
 
+          {/* Mobile cards */}
           <div className="space-y-4 md:hidden">
             {recentCases.length === 0 ? (
               <EmptyState onUpload={() => router.push("/upload")} />
@@ -718,13 +771,16 @@ export default function DashboardPage() {
                     />
                     <InfoMini
                       label="Confidence"
-                      value={`${((item.confidence || 0) * 100).toFixed(1)}%`}
+                      value={`${(item.confidence * 100).toFixed(1)}%`}
                     />
                     <InfoMini label="Date" value={formatDate(item.createdAt)} />
                     <InfoMini
                       label="Status"
                       value={item.status || "Completed"}
                     />
+                    {item.riskLevel && (
+                      <InfoMini label="Risk Level" value={item.riskLevel} />
+                    )}
                   </div>
 
                   <button
@@ -738,6 +794,7 @@ export default function DashboardPage() {
             )}
           </div>
 
+          {/* Desktop table */}
           <div className="hidden overflow-x-auto rounded-2xl border border-[var(--border)] md:block">
             {recentCases.length === 0 ? (
               <div className="p-8">
@@ -751,6 +808,7 @@ export default function DashboardPage() {
                     <th className="px-4 py-4 text-left font-semibold">Patient</th>
                     <th className="px-4 py-4 text-left font-semibold">Prediction</th>
                     <th className="px-4 py-4 text-left font-semibold">Confidence</th>
+                    <th className="px-4 py-4 text-left font-semibold">Risk Level</th>
                     <th className="px-4 py-4 text-left font-semibold">Date</th>
                     <th className="px-4 py-4 text-left font-semibold">Status</th>
                     <th className="px-4 py-4 text-left font-semibold">Action</th>
@@ -773,7 +831,10 @@ export default function DashboardPage() {
                         <StatusBadge prediction={item.prediction} />
                       </td>
                       <td className="px-4 py-4 text-[var(--foreground)]">
-                        {((item.confidence || 0) * 100).toFixed(1)}%
+                        {(item.confidence * 100).toFixed(1)}%
+                      </td>
+                      <td className="px-4 py-4 text-[var(--text-soft)]">
+                        {item.riskLevel || "—"}
                       </td>
                       <td className="px-4 py-4 text-[var(--text-soft)]">
                         {formatDate(item.createdAt)}
@@ -797,6 +858,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* Workflow + Notes */}
         <div className="mt-8 grid gap-4 lg:grid-cols-2">
           <div className="rounded-[28px] bg-white p-6 shadow-[var(--shadow-card)]">
             <h3 className="text-lg font-bold text-[var(--foreground)]">
@@ -866,11 +928,12 @@ export default function DashboardPage() {
   );
 }
 
+// ---------- Helper functions (unchanged but kept) ----------
 function parseDate(value?: Timestamp | string | null) {
   if (!value) return null;
 
   if (typeof value === "string") {
-    const d = new Date(value);
+    const d = new Date(value.replace(" ", "T"));
     return isNaN(d.getTime()) ? null : d;
   }
 
@@ -892,63 +955,36 @@ function getSortableTime(value?: Timestamp | string | null) {
 
 function getReadableFirestoreError(err: any) {
   const code = err?.code || "";
-
   if (code.includes("permission-denied")) {
     return "Permission denied while reading Firestore data. Check Firestore rules.";
   }
-
   if (code.includes("failed-precondition")) {
     return "Firestore index or query requirement not satisfied. Create the required composite index for userId + createdAt.";
   }
-
   if (code.includes("unavailable")) {
     return "Firestore is temporarily unavailable.";
   }
-
   return "Unable to load dashboard data.";
 }
 
-function StatCard({
-  title,
-  value,
-  icon,
-  color,
-}: {
-  title: string;
-  value: number;
-  icon: React.ReactNode;
-  color: string;
-}) {
+// ---------- UI Components (unchanged) ----------
+function StatCard({ title, value, icon, color }: { title: string; value: number; icon: React.ReactNode; color: string }) {
   return (
     <div className="rounded-[24px] bg-white p-4 shadow-[var(--shadow-card)] animate-fade-in-up sm:p-5">
       <div className="flex items-center justify-between">
         <div className={`rounded-2xl p-3 ${color}`}>{icon}</div>
       </div>
       <p className="mt-4 text-sm text-[var(--text-soft)]">{title}</p>
-      <p className="mt-1 text-xl font-bold text-[var(--foreground)] sm:text-3xl">
-        {value}
-      </p>
+      <p className="mt-1 text-xl font-bold text-[var(--foreground)] sm:text-3xl">{value}</p>
     </div>
   );
 }
 
-function InfoStripCard({
-  title,
-  value,
-  icon,
-  note,
-}: {
-  title: string;
-  value: string | number;
-  icon: React.ReactNode;
-  note: string;
-}) {
+function InfoStripCard({ title, value, icon, note }: { title: string; value: string | number; icon: React.ReactNode; note: string }) {
   return (
     <div className="rounded-[24px] bg-white p-5 shadow-[var(--shadow-card)]">
       <div className="flex items-center gap-3">
-        <div className="rounded-2xl bg-[var(--secondary)]/35 p-3 text-[var(--primary)]">
-          {icon}
-        </div>
+        <div className="rounded-2xl bg-[var(--secondary)]/35 p-3 text-[var(--primary)]">{icon}</div>
         <div>
           <p className="text-sm text-[var(--text-soft)]">{title}</p>
           <p className="text-lg font-bold text-[var(--foreground)]">{value}</p>
@@ -959,45 +995,21 @@ function InfoStripCard({
   );
 }
 
-function ActionCard({
-  title,
-  desc,
-  cta,
-  onClick,
-}: {
-  title: string;
-  desc: string;
-  cta: string;
-  onClick: () => void;
-}) {
+function ActionCard({ title, desc, cta, onClick }: { title: string; desc: string; cta: string; onClick: () => void }) {
   return (
     <div className="rounded-[24px] bg-white p-5 shadow-[var(--shadow-card)] animate-fade-in-up">
       <h3 className="text-lg font-bold text-[var(--foreground)]">{title}</h3>
       <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">{desc}</p>
-      <button
-        onClick={onClick}
-        className="mt-5 rounded-2xl bg-[var(--primary)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--primary-dark)]"
-      >
+      <button onClick={onClick} className="mt-5 rounded-2xl bg-[var(--primary)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--primary-dark)]">
         {cta}
       </button>
     </div>
   );
 }
 
-function QuickLinkCard({
-  title,
-  icon,
-  onClick,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  onClick: () => void;
-}) {
+function QuickLinkCard({ title, icon, onClick }: { title: string; icon: React.ReactNode; onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      className="rounded-2xl bg-[var(--secondary)]/35 p-4 text-left hover:bg-[var(--secondary)]/55"
-    >
+    <button onClick={onClick} className="rounded-2xl bg-[var(--secondary)]/35 p-4 text-left hover:bg-[var(--secondary)]/55">
       <div className="flex items-center gap-2 text-[var(--primary)]">
         {icon}
         <span className="font-semibold">{title}</span>
@@ -1006,20 +1018,10 @@ function QuickLinkCard({
   );
 }
 
-function WorkflowRow({
-  step,
-  title,
-  desc,
-}: {
-  step: string;
-  title: string;
-  desc: string;
-}) {
+function WorkflowRow({ step, title, desc }: { step: string; title: string; desc: string }) {
   return (
     <div className="flex gap-4">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--secondary)]/50 text-sm font-bold text-[var(--primary)]">
-        {step}
-      </div>
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--secondary)]/50 text-sm font-bold text-[var(--primary)]">{step}</div>
       <div>
         <p className="font-semibold text-[var(--foreground)]">{title}</p>
         <p className="text-sm text-[var(--text-soft)]">{desc}</p>
@@ -1030,37 +1032,20 @@ function WorkflowRow({
 
 function StatusBadge({ prediction }: { prediction?: string }) {
   const normalized = (prediction || "unknown").toLowerCase();
-
   if (normalized === "fracture") {
-    return (
-      <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600">
-        Fracture
-      </span>
-    );
+    return <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600">Fracture</span>;
   }
-
   if (normalized === "normal") {
-    return (
-      <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-600">
-        Normal
-      </span>
-    );
+    return <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-600">Normal</span>;
   }
-
-  return (
-    <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-600">
-      Unknown
-    </span>
-  );
+  return <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-600">Unknown</span>;
 }
 
 function InfoMini({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
       <p className="text-xs text-[var(--text-soft)]">{label}</p>
-      <p className="mt-1 truncate font-medium text-[var(--foreground)]">
-        {value}
-      </p>
+      <p className="mt-1 truncate font-medium text-[var(--foreground)]">{value}</p>
     </div>
   );
 }
@@ -1069,32 +1054,18 @@ function EmptyState({ onUpload }: { onUpload: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-2xl bg-[var(--card)]/35 p-8 text-center">
       <FileImage className="h-10 w-10 text-[var(--primary)]" />
-      <h3 className="mt-4 text-lg font-bold text-[var(--foreground)]">
-        No cases available
-      </h3>
+      <h3 className="mt-4 text-lg font-bold text-[var(--foreground)]">No cases available</h3>
       <p className="mt-2 max-w-md text-sm text-[var(--text-soft)]">
-        Start by uploading a pediatric wrist radiograph to generate your first
-        AI-assisted case result.
+        Start by uploading a pediatric wrist radiograph to generate your first AI-assisted case result.
       </p>
-      <button
-        onClick={onUpload}
-        className="mt-5 rounded-2xl bg-[var(--primary)] px-5 py-3 text-sm font-semibold text-white hover:bg-[var(--primary-dark)]"
-      >
+      <button onClick={onUpload} className="mt-5 rounded-2xl bg-[var(--primary)] px-5 py-3 text-sm font-semibold text-white hover:bg-[var(--primary-dark)]">
         Upload First Scan
       </button>
     </div>
   );
 }
 
-function MobileInsightCard({
-  title,
-  desc,
-  icon,
-}: {
-  title: string;
-  desc: string;
-  icon: React.ReactNode;
-}) {
+function MobileInsightCard({ title, desc, icon }: { title: string; desc: string; icon: React.ReactNode }) {
   return (
     <div className="rounded-[24px] bg-white p-5 shadow-[var(--shadow-card)] animate-fade-in-up">
       <div className="flex items-center gap-3 text-[var(--primary)]">
@@ -1106,20 +1077,9 @@ function MobileInsightCard({
   );
 }
 
-function ShortcutButton({
-  label,
-  onClick,
-  icon,
-}: {
-  label: string;
-  onClick: () => void;
-  icon: React.ReactNode;
-}) {
+function ShortcutButton({ label, onClick, icon }: { label: string; onClick: () => void; icon: React.ReactNode }) {
   return (
-    <button
-      onClick={onClick}
-      className="rounded-2xl bg-[var(--card)] px-4 py-4 text-left hover:bg-[var(--secondary)]/35"
-    >
+    <button onClick={onClick} className="rounded-2xl bg-[var(--card)] px-4 py-4 text-left hover:bg-[var(--secondary)]/35">
       <div className="flex flex-col items-start gap-2 text-[var(--primary)]">
         {icon}
         <span className="text-sm font-semibold">{label}</span>
