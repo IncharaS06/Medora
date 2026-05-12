@@ -11,6 +11,7 @@ import {
     query,
     limit,
     where,
+    orderBy,
 } from "firebase/firestore";
 
 import {
@@ -22,7 +23,7 @@ import {
     ScanLine,
     ShieldAlert,
     Layers,
-    Target,
+    RefreshCw,
 } from "lucide-react";
 
 type DetectionType = {
@@ -58,7 +59,7 @@ type ResultType = {
     normal_probability?: number;
     risk_level?: string;
     severity?: string;
-    detections?: DetectionType[];           // top‑level detections (if any)
+    detections?: DetectionType[];
     detections_count?: number;
     image_width?: number;
     image_height?: number;
@@ -71,7 +72,6 @@ type ResultType = {
     originalImageBase64?: string;
     annotatedImageBase64?: string;
     gradCamBase64?: string;
-    // Two‑stage pipeline fields
     stage1_efficientnet?: StageEfficientNet;
     stage2_yolo?: StageYOLO;
 };
@@ -94,12 +94,12 @@ function getImageSrc(value?: string) {
 function getReadableFirestoreError(err: any) {
     const code = err?.code || "";
     if (code.includes("permission-denied")) {
-        return "Permission denied while reading Firestore data.";
+        return "Permission denied. Check Firestore rules.";
     }
     if (code.includes("failed-precondition")) {
-        return "Missing Firestore index for this query.";
+        return "Missing Firestore index. Create the required index.";
     }
-    return "Failed to load latest analysis result.";
+    return "Failed to load analysis result.";
 }
 
 export default function ResultsPage() {
@@ -108,6 +108,7 @@ export default function ResultsPage() {
     const [result, setResult] = useState<ResultType | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
+    const [refreshing, setRefreshing] = useState(false);
 
     useEffect(() => {
         const unsub = onAuthStateChanged(auth, (user) => {
@@ -120,98 +121,105 @@ export default function ResultsPage() {
         return () => unsub();
     }, [router]);
 
-    useEffect(() => {
-        const fetchLatestResult = async () => {
-            try {
-                if (!firebaseUser) return;
+    const fetchLatestResult = async () => {
+        if (!firebaseUser) return;
+        try {
+            setError("");
+            setRefreshing(true);
 
-                const q = query(
+            // First try with userId
+            let q = query(
+                collection(db, "cases"),
+                where("userId", "==", firebaseUser.uid),
+                orderBy("timestamp", "desc"),
+                limit(1)
+            );
+            let snap = await getDocs(q);
+
+            // If no results, try userEmail
+            if (snap.empty && firebaseUser.email) {
+                console.warn("No cases with userId, trying userEmail");
+                q = query(
                     collection(db, "cases"),
-                    where("userId", "==", firebaseUser.uid),
-                    limit(10)
+                    where("userEmail", "==", firebaseUser.email),
+                    orderBy("timestamp", "desc"),
+                    limit(1)
                 );
-
-                const snap = await getDocs(q);
-
-                if (snap.empty) {
-                    setError("No analysis result found.");
-                    setLoading(false);
-                    return;
-                }
-
-                const items: ResultType[] = snap.docs.map((doc) => {
-                    const data = doc.data();
-
-                    // Extract stage1 and stage2 details
-                    const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
-                    const stage2 = data.stage2_yolo as StageYOLO | undefined;
-
-                    // Use top‑level detections if present, otherwise fallback to stage2.detections
-                    let detections: DetectionType[] = [];
-                    if (Array.isArray(data.detections)) {
-                        detections = data.detections;
-                    } else if (stage2?.detections && Array.isArray(stage2.detections)) {
-                        detections = stage2.detections;
-                    }
-
-                    const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
-                    const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
-
-                    return {
-                        id: doc.id,
-                        case_id: data.case_id || "",
-                        filename: data.filename || "",
-                        aspect_ratio: data.aspect_ratio || "",
-                        final_result: data.final_result || "Unknown",
-                        fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
-                        normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
-                        risk_level: data.risk_level || "Unknown",
-                        severity: data.severity || "",
-                        detections: detections,
-                        detections_count: detectionsCount,
-                        image_width: typeof data.image_width === "number" ? data.image_width : 0,
-                        image_height: typeof data.image_height === "number" ? data.image_height : 0,
-                        recommendation: data.recommendation || "",
-                        summary: data.summary || "",
-                        timestamp: data.timestamp || "",
-                        yolo_confidence: yoloConfidence,
-                        file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
-                        is_fracture: Boolean(data.is_fracture),
-                        originalImageBase64: data.originalImageBase64 || "",
-                        annotatedImageBase64: data.annotatedImageBase64 || "",
-                        gradCamBase64: data.gradCamBase64 || "",
-                        stage1_efficientnet: stage1,
-                        stage2_yolo: stage2,
-                    };
-                });
-
-                // Sort by timestamp descending (most recent first)
-                items.sort((a, b) => {
-                    const aTime = a.timestamp || "";
-                    const bTime = b.timestamp || "";
-                    return bTime.localeCompare(aTime);
-                });
-
-                const latest = items[0] || null;
-                setResult(latest);
-                setError("");
-            } catch (err) {
-                console.error(err);
-                setError(getReadableFirestoreError(err));
-            } finally {
-                setLoading(false);
+                snap = await getDocs(q);
             }
-        };
 
+            if (snap.empty) {
+                setError("No analysis result found. Please upload a scan first.");
+                setResult(null);
+                return;
+            }
+
+            const docSnap = snap.docs[0];
+            const data = docSnap.data();
+
+            const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
+            const stage2 = data.stage2_yolo as StageYOLO | undefined;
+
+            let detections: DetectionType[] = [];
+            if (Array.isArray(data.detections)) {
+                detections = data.detections;
+            } else if (stage2?.detections && Array.isArray(stage2.detections)) {
+                detections = stage2.detections;
+            }
+
+            const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
+            const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
+
+            const payload: ResultType = {
+                id: docSnap.id,
+                case_id: data.case_id || "",
+                filename: data.filename || "",
+                aspect_ratio: data.aspect_ratio || "",
+                final_result: data.final_result || "Unknown",
+                fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
+                normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
+                risk_level: data.risk_level || "Unknown",
+                severity: data.severity || "",
+                detections: detections,
+                detections_count: detectionsCount,
+                image_width: typeof data.image_width === "number" ? data.image_width : 0,
+                image_height: typeof data.image_height === "number" ? data.image_height : 0,
+                recommendation: data.recommendation || "",
+                summary: data.summary || "",
+                timestamp: data.timestamp || "",
+                yolo_confidence: yoloConfidence,
+                file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
+                is_fracture: Boolean(data.is_fracture),
+                originalImageBase64: data.originalImageBase64 || "",
+                annotatedImageBase64: data.annotatedImageBase64 || "",
+                gradCamBase64: data.gradCamBase64 || "",
+                stage1_efficientnet: stage1,
+                stage2_yolo: stage2,
+            };
+
+            setResult(payload);
+        } catch (err) {
+            console.error("Fetch error:", err);
+            setError(getReadableFirestoreError(err));
+            setResult(null);
+        } finally {
+            setLoading(false);
+            setRefreshing(false);
+        }
+    };
+
+    useEffect(() => {
         fetchLatestResult();
     }, [firebaseUser]);
 
     const originalSrc = useMemo(() => getImageSrc(result?.originalImageBase64), [result]);
     const annotatedSrc = useMemo(() => getImageSrc(result?.annotatedImageBase64), [result]);
     const gradCamSrc = useMemo(() => getImageSrc(result?.gradCamBase64), [result]);
-
-    // Use detections from state (already merged)
     const detections = result?.detections || [];
+
+    const handleRefresh = () => {
+        fetchLatestResult();
+    };
 
     if (loading) {
         return (
@@ -231,7 +239,7 @@ export default function ResultsPage() {
     if (error || !result) {
         return (
             <main className="min-h-screen bg-[var(--background)] flex items-center justify-center px-4">
-                <div className="bg-white rounded-3xl p-8 shadow-lg text-center">
+                <div className="bg-white rounded-3xl p-8 shadow-lg text-center max-w-md">
                     <p className="text-red-600 font-semibold">
                         {error || "Result not available"}
                     </p>
@@ -255,12 +263,22 @@ export default function ResultsPage() {
                         MEDORA Results
                     </h1>
                 </div>
-                <button
-                    onClick={() => router.push("/dashboard")}
-                    className="px-4 py-2 rounded-xl bg-[var(--primary-dark)] text-white font-semibold"
-                >
-                    Dashboard
-                </button>
+                <div className="flex gap-3">
+                    <button
+                        onClick={handleRefresh}
+                        disabled={refreshing}
+                        className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 font-semibold hover:bg-gray-200 disabled:opacity-50 flex items-center gap-2"
+                    >
+                        <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+                        Refresh
+                    </button>
+                    <button
+                        onClick={() => router.push("/dashboard")}
+                        className="px-4 py-2 rounded-xl bg-[var(--primary-dark)] text-white font-semibold"
+                    >
+                        Dashboard
+                    </button>
+                </div>
             </div>
 
             <div className="max-w-7xl mx-auto mt-8 bg-white rounded-[30px] p-6 sm:p-8 shadow-[var(--shadow-card)]">
@@ -305,7 +323,7 @@ export default function ResultsPage() {
                     />
                 </div>
 
-                {/* SEVERITY (if present) */}
+                {/* SEVERITY */}
                 {result.severity && (
                     <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">
                         ⚠️ {result.severity}
@@ -451,7 +469,7 @@ export default function ResultsPage() {
     );
 }
 
-// ---------- UI Components ----------
+// ---------- UI Components (unchanged) ----------
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return (
         <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5">
