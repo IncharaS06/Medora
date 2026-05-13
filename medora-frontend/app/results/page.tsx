@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, getDocs, getDoc, doc } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, query, where } from "firebase/firestore";
 import {
     Activity,
     AlertTriangle,
@@ -17,7 +17,7 @@ import {
     RefreshCw,
 } from "lucide-react";
 
-// --- Types matching your Firestore document ---
+// --- Exact types from your Firestore document ---
 type Detection = {
     bbox: number[];
     center_x: number;
@@ -73,10 +73,17 @@ type AnalysisResult = {
     yolo_confidence: number;
 };
 
-// Simple helper: just return the URL as is (it's already a data URL)
-function getImageSrc(value?: string) {
-    if (!value) return "";
-    return value; // Your Firestore already stores full data:image/... URLs
+// Helper: ensure data URL is valid
+function getValidImageSrc(url: string | undefined): string {
+    if (!url) return "";
+    // If it already starts with data:image, return as is
+    if (url.startsWith("data:image/")) return url;
+    // If it's a raw base64 string (no data: prefix), add it
+    if (url.match(/^[A-Za-z0-9+/=]+$/)) {
+        return `data:image/jpeg;base64,${url}`;
+    }
+    // Otherwise treat as normal URL
+    return url;
 }
 
 export default function ResultsPage() {
@@ -100,16 +107,27 @@ export default function ResultsPage() {
         return () => unsubscribe();
     }, [router]);
 
-    // Process a single document (with safe defaults)
+    // Process a single document
     const processDocument = (docId: string, data: any) => {
-        console.log("Processing document:", docId, data);
-        setDebugInfo(`Processing: ${docId}`);
+        console.log("Processing document:", docId);
+        console.log("Data keys:", Object.keys(data));
+        
+        const imageUrls = data.image_urls || {};
+        console.log("Image URLs object:", imageUrls);
+        
+        // Validate that image URLs exist and are not empty
+        if (!imageUrls.original_url) {
+            console.warn("No original_url found in document");
+        }
+        if (!imageUrls.yolo_annotated_url) {
+            console.warn("No yolo_annotated_url found");
+        }
+        if (!imageUrls.gradcam_overlay_url) {
+            console.warn("No gradcam_overlay_url found");
+        }
 
         const stage1 = data.stage1_efficientnet || {};
         const stage2 = data.stage2_yolo || {};
-        const imageUrls = data.image_urls || {};
-
-        console.log("Image URLs from Firestore:", imageUrls); // Debug log
 
         let detections: Detection[] = [];
         if (Array.isArray(data.detections)) detections = data.detections;
@@ -155,10 +173,10 @@ export default function ResultsPage() {
         };
 
         setResult(resultData);
-        setDebugInfo("✅ Data loaded successfully");
+        setDebugInfo(`✅ Loaded document: ${docId}`);
     };
 
-    // Fetch all docs and pick the first complete one
+    // Fetch the specific document by case_id or the one with image_urls
     const fetchLatestResult = async () => {
         if (!user) return;
 
@@ -168,37 +186,69 @@ export default function ResultsPage() {
             setLoading(true);
             setDebugInfo("Fetching documents...");
 
+            // First, try to get by case_id if provided
+            if (caseIdParam) {
+                setDebugInfo(`Looking for case_id: ${caseIdParam}`);
+                const docRef = doc(db, "cases", caseIdParam);
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    processDocument(docSnap.id, docSnap.data());
+                    return;
+                } else {
+                    setDebugInfo(`Document with case_id ${caseIdParam} not found, falling back to full scan`);
+                }
+            }
+
+            // Get all documents and find the one with complete image_urls
             const casesRef = collection(db, "cases");
             const snapshot = await getDocs(casesRef);
             console.log(`Total docs: ${snapshot.size}`);
             setDebugInfo(`Found ${snapshot.size} documents`);
 
             if (snapshot.empty) {
-                setError("No analysis results found. Please upload a scan first.");
+                setError("No analysis results found.");
                 return;
             }
 
-            // Find a valid document (with image_urls and final_result)
-            let validDoc = null;
+            // Find the document that has image_urls with actual data
+            let bestDoc = null;
             for (const docSnap of snapshot.docs) {
                 const data = docSnap.data();
-                if (data.image_urls && data.final_result) {
-                    validDoc = { id: docSnap.id, data };
-                    console.log("✅ Using valid doc with image_urls:", docSnap.id);
-                    setDebugInfo(`Using document: ${docSnap.id}`);
+                const urls = data.image_urls;
+                // Check if this document has the expected structure
+                if (urls && urls.original_url && urls.original_url.startsWith("data:image")) {
+                    bestDoc = { id: docSnap.id, data };
+                    console.log("Found document with valid image URLs:", docSnap.id);
+                    setDebugInfo(`Using document with images: ${docSnap.id}`);
                     break;
                 }
             }
 
-            if (!validDoc) {
-                // Fallback to the first document (maybe incomplete)
-                validDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
-                console.log("⚠️ Using first document as fallback (may lack images)");
-                setDebugInfo(`Fallback document: ${validDoc.id}`);
+            // Fallback to any document that has any image_urls
+            if (!bestDoc) {
+                for (const docSnap of snapshot.docs) {
+                    const data = docSnap.data();
+                    if (data.image_urls && data.image_urls.original_url) {
+                        bestDoc = { id: docSnap.id, data };
+                        console.log("Fallback to document with some image URLs:", docSnap.id);
+                        setDebugInfo(`Fallback document: ${docSnap.id}`);
+                        break;
+                    }
+                }
             }
 
-            if (validDoc) processDocument(validDoc.id, validDoc.data);
-            else setError("No valid document could be processed.");
+            // Last resort: first document
+            if (!bestDoc && snapshot.docs.length > 0) {
+                bestDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
+                console.warn("No document with image_urls found, using first document");
+                setDebugInfo(`Using first document (may lack images): ${bestDoc.id}`);
+            }
+
+            if (bestDoc) {
+                processDocument(bestDoc.id, bestDoc.data);
+            } else {
+                setError("No valid document found.");
+            }
         } catch (err: any) {
             console.error("Fetch error:", err);
             setError(`Firestore error: ${err.message}`);
@@ -213,15 +263,18 @@ export default function ResultsPage() {
         if (user) fetchLatestResult();
     }, [user, caseIdParam]);
 
-    const originalSrc = useMemo(() => getImageSrc(result?.image_urls?.original_url), [result]);
-    const annotatedSrc = useMemo(() => getImageSrc(result?.image_urls?.yolo_annotated_url), [result]);
-    const gradCamSrc = useMemo(() => getImageSrc(result?.image_urls?.gradcam_overlay_url), [result]);
+    // Memoized image sources with validation
+    const originalSrc = useMemo(() => getValidImageSrc(result?.image_urls?.original_url), [result]);
+    const annotatedSrc = useMemo(() => getValidImageSrc(result?.image_urls?.yolo_annotated_url), [result]);
+    const gradCamSrc = useMemo(() => getValidImageSrc(result?.image_urls?.gradcam_overlay_url), [result]);
 
-    console.log("Image sources:", { originalSrc, annotatedSrc, gradCamSrc }); // Debug
+    // Debug logs for images
+    console.log("Original URL length:", originalSrc?.length);
+    console.log("Annotated URL length:", annotatedSrc?.length);
+    console.log("GradCAM URL length:", gradCamSrc?.length);
 
     const handleRefresh = () => fetchLatestResult();
 
-    // Loading UI
     if (loading) {
         return (
             <main className="min-h-screen bg-[var(--background)] flex items-center justify-center">
@@ -290,23 +343,59 @@ export default function ResultsPage() {
 
                 {result.severity && <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">⚠️ {result.severity}</div>}
 
-                {/* Images - now with onError fallback */}
+                {/* Images - with direct data URL and error fallback */}
                 <div className="grid lg:grid-cols-3 gap-6 mt-8">
-                    <ImagePanel title="Uploaded Image" content={
-                        originalSrc ? (
-                            <img src={originalSrc} alt="Original" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={(e) => { console.error("Original image failed to load"); e.currentTarget.src = ""; }} />
-                        ) : <EmptyImageMessage text="Original image not available" />
-                    } />
-                    <ImagePanel title="YOLO Annotated Image" content={
-                        annotatedSrc ? (
-                            <img src={annotatedSrc} alt="Annotated" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={(e) => console.error("YOLO image failed to load")} />
-                        ) : <EmptyImageMessage text="Annotated image not available" />
-                    } />
-                    <ImagePanel title="Grad‑CAM Heatmap" content={
-                        gradCamSrc ? (
-                            <img src={gradCamSrc} alt="GradCAM" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={(e) => console.error("GradCAM image failed to load")} />
-                        ) : <EmptyImageMessage text="Grad‑CAM not available" />
-                    } />
+                    <ImagePanel title="Uploaded Image">
+                        {originalSrc ? (
+                            <img 
+                                src={originalSrc} 
+                                alt="Original X-ray" 
+                                className="rounded-2xl shadow w-full object-contain max-h-[420px]" 
+                                onError={(e) => {
+                                    console.error("Original image failed to load. URL starts with:", originalSrc.substring(0, 50));
+                                    e.currentTarget.src = "";
+                                    e.currentTarget.alt = "Image failed to load";
+                                }}
+                                onLoad={() => console.log("Original image loaded successfully")}
+                            />
+                        ) : (
+                            <EmptyImageMessage text="Original image URL missing" />
+                        )}
+                    </ImagePanel>
+
+                    <ImagePanel title="YOLO Annotated Image">
+                        {annotatedSrc ? (
+                            <img 
+                                src={annotatedSrc} 
+                                alt="YOLO detections" 
+                                className="rounded-2xl shadow w-full object-contain max-h-[420px]" 
+                                onError={(e) => {
+                                    console.error("YOLO image failed to load. URL starts with:", annotatedSrc.substring(0, 50));
+                                    e.currentTarget.src = "";
+                                }}
+                                onLoad={() => console.log("YOLO image loaded successfully")}
+                            />
+                        ) : (
+                            <EmptyImageMessage text="YOLO annotated image not available" />
+                        )}
+                    </ImagePanel>
+
+                    <ImagePanel title="Grad‑CAM Heatmap">
+                        {gradCamSrc ? (
+                            <img 
+                                src={gradCamSrc} 
+                                alt="Grad-CAM heatmap" 
+                                className="rounded-2xl shadow w-full object-contain max-h-[420px]" 
+                                onError={(e) => {
+                                    console.error("GradCAM image failed to load. URL starts with:", gradCamSrc.substring(0, 50));
+                                    e.currentTarget.src = "";
+                                }}
+                                onLoad={() => console.log("GradCAM image loaded successfully")}
+                            />
+                        ) : (
+                            <EmptyImageMessage text="Grad‑CAM heatmap not available" />
+                        )}
+                    </ImagePanel>
                 </div>
 
                 {/* AI Interpretation + Technical Details */}
@@ -379,19 +468,23 @@ export default function ResultsPage() {
     );
 }
 
-// Helper components (unchanged)
+// Helper components
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5"><div className="flex items-center gap-2 text-[var(--primary)]">{icon}<span className="text-sm font-medium">{label}</span></div><p className={`mt-4 text-2xl font-bold ${valueClassName}`}>{value}</p></div>;
 }
-function ImagePanel({ title, content }: { title: string; content: React.ReactNode }) {
-    return <div className="rounded-3xl bg-[var(--card)] p-5"><h3 className="text-sm font-medium text-[var(--text-soft)] mb-4">{title}</h3>{content}</div>;
+
+function ImagePanel({ title, children }: { title: string; children: React.ReactNode }) {
+    return <div className="rounded-3xl bg-[var(--card)] p-5"><h3 className="text-sm font-medium text-[var(--text-soft)] mb-4">{title}</h3>{children}</div>;
 }
+
 function EmptyImageMessage({ text }: { text: string }) {
     return <div className="min-h-[250px] rounded-2xl border border-[var(--border)] bg-white flex items-center justify-center text-center px-4 text-sm text-[var(--text-soft)]">{text}</div>;
 }
+
 function DetailRow({ label, value }: { label: string; value: string }) {
     return <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] pb-3"><span className="text-[var(--text-soft)]">{label}</span><span className="font-medium text-right break-all">{value}</span></div>;
 }
+
 function MiniDetail({ label, value }: { label: string; value: string }) {
     return <div className="rounded-xl border border-[var(--border)] bg-[var(--background)] px-4 py-3"><p className="text-xs text-[var(--text-soft)]">{label}</p><p className="mt-1 font-semibold text-sm">{value}</p></div>;
 }
