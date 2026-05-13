@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, getDocs, doc, getDoc } from "firebase/firestore";
+import { collection, onSnapshot, query, orderBy, DocumentData } from "firebase/firestore";
 import {
     Activity,
     AlertTriangle,
@@ -18,7 +18,7 @@ import {
     ChevronRight,
 } from "lucide-react";
 
-// --- Types (same as results page) ---
+// Types
 type Detection = {
     bbox: number[];
     center_x: number;
@@ -77,6 +77,7 @@ type AnalysisResult = {
 function getValidImageSrc(url: string | undefined): string {
     if (!url) return "";
     if (url.startsWith("data:image/")) return url;
+    // If it's a raw base64 string, add data prefix
     if (url.match(/^[A-Za-z0-9+/=]+$/)) {
         return `data:image/jpeg;base64,${url}`;
     }
@@ -95,131 +96,135 @@ export default function DashboardPage() {
     // Auth
     useEffect(() => {
         const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-            if (!firebaseUser) router.push("/auth");
-            else setUser(firebaseUser);
+            if (!firebaseUser) {
+                router.push("/auth");
+                return;
+            }
+            setUser(firebaseUser);
         });
         return () => unsubscribe();
     }, [router]);
 
-    const fetchLatestResult = async () => {
+    // Fetch data with real-time listener
+    useEffect(() => {
         if (!user) return;
 
-        try {
-            setError("");
-            setRefreshing(true);
-            setLoading(true);
-            setDebugInfo("Fetching latest analysis...");
+        setLoading(true);
+        setDebugInfo("Connecting to Firestore...");
 
-            const casesRef = collection(db, "cases");
-            const snapshot = await getDocs(casesRef);
-            console.log(`Dashboard: ${snapshot.size} documents found`);
+        // Query: order by timestamp descending (most recent first)
+        const q = query(collection(db, "cases"), orderBy("timestamp", "desc"));
 
-            if (snapshot.empty) {
-                setError("No analysis results found. Upload a scan first.");
-                return;
-            }
+        const unsubscribe = onSnapshot(
+            q,
+            (snapshot) => {
+                console.log(`Dashboard: ${snapshot.size} documents received`);
+                setDebugInfo(`Found ${snapshot.size} documents`);
 
-            // Find document with complete image_urls (second one in your logs)
-            let bestDoc = null;
-            for (const docSnap of snapshot.docs) {
-                const data = docSnap.data();
-                const urls = data.image_urls;
-                if (urls && urls.original_url && urls.original_url.startsWith("data:image")) {
-                    bestDoc = { id: docSnap.id, data };
-                    console.log("Dashboard using doc with images:", docSnap.id);
-                    setDebugInfo(`Loaded: ${docSnap.id}`);
-                    break;
+                if (snapshot.empty) {
+                    setError("No analysis results found. Upload a scan first.");
+                    setResult(null);
+                    setLoading(false);
+                    return;
                 }
-            }
 
-            // Fallback to any doc with image_urls
-            if (!bestDoc) {
-                for (const docSnap of snapshot.docs) {
-                    if (docSnap.data().image_urls) {
-                        bestDoc = { id: docSnap.id, data: docSnap.data() };
-                        console.log("Dashboard fallback doc:", docSnap.id);
+                // Find the first document with complete data (image_urls and final_result)
+                let selectedDoc: { id: string; data: DocumentData } | null = null;
+                for (const doc of snapshot.docs) {
+                    const data = doc.data();
+                    // Prefer document with image_urls and final_result
+                    if (data.image_urls && data.final_result) {
+                        selectedDoc = { id: doc.id, data };
+                        console.log("Selected document with full data:", doc.id);
+                        setDebugInfo(`Using document: ${doc.id}`);
                         break;
                     }
                 }
+
+                // Fallback to first document if none has both fields
+                if (!selectedDoc && snapshot.docs.length > 0) {
+                    selectedDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
+                    console.log("Fallback to first document:", selectedDoc.id);
+                    setDebugInfo(`Fallback document: ${selectedDoc.id}`);
+                }
+
+                if (selectedDoc) {
+                    const data = selectedDoc.data;
+                    const imageUrls = data.image_urls || {};
+                    const stage1 = data.stage1_efficientnet || {};
+                    const stage2 = data.stage2_yolo || {};
+
+                    let detections: Detection[] = [];
+                    if (Array.isArray(data.detections)) detections = data.detections;
+                    else if (stage2.detections && Array.isArray(stage2.detections)) detections = stage2.detections;
+
+                    const resultData: AnalysisResult = {
+                        id: selectedDoc.id,
+                        aspect_ratio: data.aspect_ratio || "",
+                        case_id: data.case_id || "",
+                        detections,
+                        detections_count: data.detections_count ?? stage2.detections_count ?? detections.length,
+                        file_size_kb: data.file_size_kb || 0,
+                        filename: data.filename || "",
+                        final_result: data.final_result || "Unknown",
+                        fracture_probability: data.fracture_probability ?? stage1.fracture_probability ?? 0,
+                        image_height: data.image_height || 0,
+                        image_urls: {
+                            original_url: imageUrls.original_url || "",
+                            yolo_annotated_url: imageUrls.yolo_annotated_url || "",
+                            gradcam_overlay_url: imageUrls.gradcam_overlay_url || "",
+                            heatmap_url: imageUrls.heatmap_url || "",
+                        },
+                        image_width: data.image_width || 0,
+                        is_fracture: Boolean(data.is_fracture),
+                        normal_probability: data.normal_probability ?? stage1.normal_probability ?? 0,
+                        recommendation: data.recommendation || "",
+                        risk_level: data.risk_level || "Unknown",
+                        severity: data.severity || "",
+                        stage1_efficientnet: {
+                            confidence_level: stage1.confidence_level || "N/A",
+                            fracture_probability: stage1.fracture_probability ?? 0,
+                            normal_probability: stage1.normal_probability ?? 0,
+                        },
+                        stage2_yolo: {
+                            detections: stage2.detections || [],
+                            detections_count: stage2.detections_count ?? 0,
+                            max_confidence: stage2.max_confidence ?? 0,
+                            ran: stage2.ran ?? false,
+                        },
+                        summary: data.summary || "",
+                        timestamp: data.timestamp || "",
+                        yolo_confidence: data.yolo_confidence ?? stage2.max_confidence ?? 0,
+                    };
+                    setResult(resultData);
+                    setError("");
+                } else {
+                    setError("No valid document found.");
+                }
+                setLoading(false);
+                setRefreshing(false);
+            },
+            (err) => {
+                console.error("Firestore onSnapshot error:", err);
+                setError(`Firestore error: ${err.message}`);
+                setDebugInfo(`Error: ${err.message}`);
+                setLoading(false);
+                setRefreshing(false);
             }
+        );
 
-            // Last resort: first document
-            if (!bestDoc && snapshot.docs.length > 0) {
-                bestDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
-                console.warn("Dashboard using first document (may lack images)");
-            }
-
-            if (bestDoc) {
-                const data = bestDoc.data;
-                const imageUrls = data.image_urls || {};
-                const stage1 = data.stage1_efficientnet || {};
-                const stage2 = data.stage2_yolo || {};
-
-                let detections: Detection[] = [];
-                if (Array.isArray(data.detections)) detections = data.detections;
-                else if (stage2.detections && Array.isArray(stage2.detections)) detections = stage2.detections;
-
-                const resultData: AnalysisResult = {
-                    id: bestDoc.id,
-                    aspect_ratio: data.aspect_ratio || "",
-                    case_id: data.case_id || "",
-                    detections,
-                    detections_count: data.detections_count ?? stage2.detections_count ?? detections.length,
-                    file_size_kb: data.file_size_kb || 0,
-                    filename: data.filename || "",
-                    final_result: data.final_result || "Unknown",
-                    fracture_probability: data.fracture_probability ?? stage1.fracture_probability ?? 0,
-                    image_height: data.image_height || 0,
-                    image_urls: {
-                        original_url: imageUrls.original_url || "",
-                        yolo_annotated_url: imageUrls.yolo_annotated_url || "",
-                        gradcam_overlay_url: imageUrls.gradcam_overlay_url || "",
-                        heatmap_url: imageUrls.heatmap_url || "",
-                    },
-                    image_width: data.image_width || 0,
-                    is_fracture: Boolean(data.is_fracture),
-                    normal_probability: data.normal_probability ?? stage1.normal_probability ?? 0,
-                    recommendation: data.recommendation || "",
-                    risk_level: data.risk_level || "Unknown",
-                    severity: data.severity || "",
-                    stage1_efficientnet: {
-                        confidence_level: stage1.confidence_level || "N/A",
-                        fracture_probability: stage1.fracture_probability ?? 0,
-                        normal_probability: stage1.normal_probability ?? 0,
-                    },
-                    stage2_yolo: {
-                        detections: stage2.detections || [],
-                        detections_count: stage2.detections_count ?? 0,
-                        max_confidence: stage2.max_confidence ?? 0,
-                        ran: stage2.ran ?? false,
-                    },
-                    summary: data.summary || "",
-                    timestamp: data.timestamp || "",
-                    yolo_confidence: data.yolo_confidence ?? stage2.max_confidence ?? 0,
-                };
-                setResult(resultData);
-            } else {
-                setError("No valid analysis document found.");
-            }
-        } catch (err: any) {
-            console.error("Dashboard fetch error:", err);
-            setError(`Error: ${err.message}`);
-        } finally {
-            setLoading(false);
-            setRefreshing(false);
-        }
-    };
-
-    useEffect(() => {
-        if (user) fetchLatestResult();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        return () => unsubscribe();
     }, [user]);
 
     const originalSrc = useMemo(() => getValidImageSrc(result?.image_urls?.original_url), [result]);
     const annotatedSrc = useMemo(() => getValidImageSrc(result?.image_urls?.yolo_annotated_url), [result]);
     const gradCamSrc = useMemo(() => getValidImageSrc(result?.image_urls?.gradcam_overlay_url), [result]);
 
-    const handleRefresh = () => fetchLatestResult();
+    const handleRefresh = () => {
+        setRefreshing(true);
+        // onSnapshot will automatically update, so we just set refreshing state
+        setTimeout(() => setRefreshing(false), 1000);
+    };
 
     if (loading) {
         return (
@@ -240,12 +245,13 @@ export default function DashboardPage() {
                     <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto mb-3" />
                     <h2 className="text-xl font-bold text-[var(--foreground)]">No Data Available</h2>
                     <p className="text-[var(--text-soft)] mt-2">{error || "No analysis results found."}</p>
+                    <p className="text-xs text-gray-400 mt-1">Debug: {debugInfo}</p>
                     <div className="flex gap-3 mt-6 justify-center">
                         <button
                             onClick={handleRefresh}
                             className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 font-semibold flex items-center gap-2"
                         >
-                            <RefreshCw className="w-4 h-4" /> Retry
+                            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} /> Retry
                         </button>
                         <button
                             onClick={() => router.push("/upload")}
@@ -261,13 +267,10 @@ export default function DashboardPage() {
 
     return (
         <div className="space-y-6">
-            {/* Header with refresh */}
             <div className="flex items-center justify-between flex-wrap gap-3">
                 <div>
                     <h2 className="text-2xl md:text-3xl font-bold text-[var(--foreground)]">Dashboard</h2>
-                    <p className="text-sm text-[var(--text-soft)] mt-1">
-                        Latest AI analysis overview
-                    </p>
+                    <p className="text-sm text-[var(--text-soft)] mt-1">Latest AI analysis overview</p>
                 </div>
                 <button
                     onClick={handleRefresh}
@@ -279,62 +282,34 @@ export default function DashboardPage() {
                 </button>
             </div>
 
-            {/* Summary Cards Row */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <SummaryCard
-                    icon={<Activity className="w-5 h-5" />}
-                    label="Final Result"
-                    value={result.final_result}
-                    valueClassName={result.is_fracture ? "text-red-600" : "text-green-600"}
-                />
-                <SummaryCard
-                    icon={<FileBarChart2 className="w-5 h-5" />}
-                    label="Fracture Probability"
-                    value={`${result.fracture_probability.toFixed(1)}%`}
-                />
-                <SummaryCard
-                    icon={<AlertTriangle className="w-5 h-5" />}
-                    label="Risk Level"
-                    value={result.risk_level}
-                    valueClassName={
-                        result.risk_level === "High"
-                            ? "text-red-600"
-                            : result.risk_level === "Moderate"
-                            ? "text-amber-600"
-                            : "text-emerald-600"
-                    }
-                />
-                <SummaryCard
-                    icon={<ScanLine className="w-5 h-5" />}
-                    label="Regions Detected"
-                    value={`${result.detections_count}`}
-                />
+                <SummaryCard icon={<Activity className="w-5 h-5" />} label="Final Result" value={result.final_result} valueClassName={result.is_fracture ? "text-red-600" : "text-green-600"} />
+                <SummaryCard icon={<FileBarChart2 className="w-5 h-5" />} label="Fracture Probability" value={`${result.fracture_probability.toFixed(1)}%`} />
+                <SummaryCard icon={<AlertTriangle className="w-5 h-5" />} label="Risk Level" value={result.risk_level} valueClassName={
+                    result.risk_level === "High" ? "text-red-600" : result.risk_level === "Moderate" ? "text-amber-600" : "text-emerald-600"
+                } />
+                <SummaryCard icon={<ScanLine className="w-5 h-5" />} label="Regions Detected" value={`${result.detections_count}`} />
             </div>
 
-            {/* Severity Banner */}
             {result.severity && (
                 <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">
                     ⚠️ {result.severity}
                 </div>
             )}
 
-            {/* Three image previews */}
             <div className="grid lg:grid-cols-3 gap-5">
                 <ImageTile title="Original X-Ray" src={originalSrc} />
                 <ImageTile title="YOLO Detection" src={annotatedSrc} />
                 <ImageTile title="Grad-CAM Heatmap" src={gradCamSrc} />
             </div>
 
-            {/* AI Interpretation + Quick Actions */}
             <div className="grid md:grid-cols-2 gap-5">
                 <div className="bg-white rounded-2xl border border-[var(--border)] p-5 shadow-sm">
                     <div className="flex items-center gap-2 mb-4">
                         <Brain className="w-5 h-5 text-[var(--primary)]" />
                         <h3 className="font-bold text-lg">AI Interpretation</h3>
                     </div>
-                    <p className="text-sm text-[var(--foreground)] leading-relaxed">
-                        {result.summary}
-                    </p>
+                    <p className="text-sm text-[var(--foreground)] leading-relaxed">{result.summary}</p>
                     <div className="mt-5 pt-4 border-t border-[var(--border)]">
                         <p className="text-xs font-semibold text-[var(--text-soft)] uppercase tracking-wide">Recommendation</p>
                         <p className="text-sm mt-1">{result.recommendation}</p>
@@ -354,17 +329,13 @@ export default function DashboardPage() {
                         <p><span className="font-semibold">YOLO Max Confidence:</span> {result.yolo_confidence.toFixed(2)}%</p>
                     </div>
                     <div className="mt-5 flex justify-end">
-                        <button
-                            onClick={() => router.push("/results")}
-                            className="text-sm font-semibold text-[var(--primary-dark)] flex items-center gap-1 hover:underline"
-                        >
+                        <button onClick={() => router.push("/results")} className="text-sm font-semibold text-[var(--primary-dark)] flex items-center gap-1 hover:underline">
                             View full report <ChevronRight className="w-4 h-4" />
                         </button>
                     </div>
                 </div>
             </div>
 
-            {/* Detection Details (if any) */}
             {result.detections.length > 0 && (
                 <div className="bg-white rounded-2xl border border-[var(--border)] p-5 shadow-sm">
                     <h3 className="font-bold text-lg mb-4">Detection Details</h3>
@@ -386,7 +357,6 @@ export default function DashboardPage() {
                 </div>
             )}
 
-            {/* Clinical disclaimer */}
             <div className="rounded-xl bg-gray-50 border border-[var(--border)] px-4 py-3 text-xs text-[var(--text-soft)] text-center">
                 🧠 MEDORA is an AI decision‑support system. Final diagnosis must be validated by a radiologist or clinician.
             </div>
@@ -394,7 +364,7 @@ export default function DashboardPage() {
     );
 }
 
-// --- Helper Components ---
+// Helper Components
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return (
         <div className="bg-white rounded-2xl border border-[var(--border)] p-5 shadow-sm">
@@ -408,34 +378,30 @@ function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foregro
 }
 
 function ImageTile({ title, src }: { title: string; src: string }) {
+    const [imgError, setImgError] = useState(false);
+
     return (
         <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
             <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
                 <h3 className="font-semibold text-sm">{title}</h3>
             </div>
             <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
-                {src ? (
+                {src && !imgError ? (
                     <img
                         src={src}
                         alt={title}
                         className="max-h-[200px] w-auto object-contain rounded"
-                        onError={(e) => {
+                        onError={() => {
                             console.error(`Failed to load ${title}`);
-                            e.currentTarget.style.display = "none";
-                            e.currentTarget.nextSibling?.style?.setProperty("display", "flex");
+                            setImgError(true);
                         }}
-                        onLoad={(e) => console.log(`${title} loaded`)}
+                        onLoad={() => console.log(`${title} loaded successfully`)}
                     />
-                ) : null}
-                {!src && (
+                ) : (
                     <div className="text-center text-[var(--text-soft)] text-sm">
-                        <p>No image available</p>
+                        <p>{imgError ? "⚠️ Failed to load image" : "No image available"}</p>
                     </div>
                 )}
-                {/* Fallback div if img fails */}
-                <div style={{ display: "none" }} className="text-center text-[var(--text-soft)] text-sm">
-                    <p>⚠️ Failed to load image</p>
-                </div>
             </div>
         </div>
     );
