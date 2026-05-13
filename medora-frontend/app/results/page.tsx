@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-
 import {
     collection,
     getDocs,
@@ -12,7 +11,6 @@ import {
     limit,
     orderBy,
 } from "firebase/firestore";
-
 import {
     Activity,
     AlertTriangle,
@@ -48,6 +46,13 @@ type StageYOLO = {
     ran?: boolean;
 };
 
+type ImageUrls = {
+    original_url?: string;
+    yolo_annotated_url?: string;
+    gradcam_overlay_url?: string;
+    heatmap_url?: string;
+};
+
 type ResultType = {
     id?: string;
     case_id?: string;
@@ -68,9 +73,7 @@ type ResultType = {
     yolo_confidence?: number;
     file_size_kb?: number;
     is_fracture?: boolean;
-    originalImageBase64?: string;
-    annotatedImageBase64?: string;
-    gradCamBase64?: string;
+    image_urls?: ImageUrls;
     stage1_efficientnet?: StageEfficientNet;
     stage2_yolo?: StageYOLO;
 };
@@ -79,15 +82,18 @@ function getImageSrc(value?: string) {
     if (!value) return "";
     const trimmed = value.trim();
     if (!trimmed) return "";
+    // Already a data URL
     if (trimmed.startsWith("data:image/")) return trimmed;
-    const looksLikeBase64 =
+    // If it's raw base64 (no http prefix), wrap it
+    if (
         trimmed.length > 100 &&
         !trimmed.includes("http://") &&
-        !trimmed.includes("https://");
-    if (looksLikeBase64) {
+        !trimmed.includes("https://")
+    ) {
         return `data:image/jpeg;base64,${trimmed}`;
     }
-    return "";
+    // Otherwise treat as normal URL
+    return trimmed;
 }
 
 function getReadableFirestoreError(err: any) {
@@ -122,9 +128,6 @@ export default function ResultsPage() {
             setError("");
             setRefreshing(true);
 
-            // Simple query: get the most recent case by timestamp (descending)
-            // Assumes only this user's cases exist in the collection.
-            // If you have multiple users, you must add a userId field to each case document.
             const q = query(
                 collection(db, "cases"),
                 orderBy("timestamp", "desc"),
@@ -142,18 +145,31 @@ export default function ResultsPage() {
             const docSnap = snap.docs[0];
             const data = docSnap.data();
 
-            const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
-            const stage2 = data.stage2_yolo as StageYOLO | undefined;
-
+            // --- Extract from top‑level OR from stage2_yolo ---
             let detections: DetectionType[] = [];
             if (Array.isArray(data.detections)) {
                 detections = data.detections;
-            } else if (stage2?.detections && Array.isArray(stage2.detections)) {
-                detections = stage2.detections;
+            } else if (data.stage2_yolo?.detections && Array.isArray(data.stage2_yolo.detections)) {
+                detections = data.stage2_yolo.detections;
             }
 
-            const detectionsCount = data.detections_count ?? stage2?.detections_count ?? detections.length;
-            const yoloConfidence = data.yolo_confidence ?? stage2?.max_confidence ?? 0;
+            const detectionsCount =
+                data.detections_count ??
+                data.stage2_yolo?.detections_count ??
+                detections.length;
+
+            const yoloConfidence =
+                data.yolo_confidence ?? data.stage2_yolo?.max_confidence ?? 0;
+
+            const stage1 = data.stage1_efficientnet as StageEfficientNet | undefined;
+            const fractureProb =
+                typeof data.fracture_probability === "number"
+                    ? data.fracture_probability
+                    : stage1?.fracture_probability ?? 0;
+            const normalProb =
+                typeof data.normal_probability === "number"
+                    ? data.normal_probability
+                    : stage1?.normal_probability ?? 0;
 
             const payload: ResultType = {
                 id: docSnap.id,
@@ -161,8 +177,8 @@ export default function ResultsPage() {
                 filename: data.filename || "",
                 aspect_ratio: data.aspect_ratio || "",
                 final_result: data.final_result || "Unknown",
-                fracture_probability: typeof data.fracture_probability === "number" ? data.fracture_probability : (stage1?.fracture_probability ?? 0),
-                normal_probability: typeof data.normal_probability === "number" ? data.normal_probability : (stage1?.normal_probability ?? 0),
+                fracture_probability: fractureProb,
+                normal_probability: normalProb,
                 risk_level: data.risk_level || "Unknown",
                 severity: data.severity || "",
                 detections: detections,
@@ -175,11 +191,9 @@ export default function ResultsPage() {
                 yolo_confidence: yoloConfidence,
                 file_size_kb: typeof data.file_size_kb === "number" ? data.file_size_kb : 0,
                 is_fracture: Boolean(data.is_fracture),
-                originalImageBase64: data.originalImageBase64 || "",
-                annotatedImageBase64: data.annotatedImageBase64 || "",
-                gradCamBase64: data.gradCamBase64 || "",
+                image_urls: data.image_urls as ImageUrls | undefined,
                 stage1_efficientnet: stage1,
-                stage2_yolo: stage2,
+                stage2_yolo: data.stage2_yolo as StageYOLO | undefined,
             };
 
             setResult(payload);
@@ -195,11 +209,20 @@ export default function ResultsPage() {
 
     useEffect(() => {
         fetchLatestResult();
-    }, []); // Only runs once on mount, not dependent on firebaseUser
+    }, []);
 
-    const originalSrc = useMemo(() => getImageSrc(result?.originalImageBase64), [result]);
-    const annotatedSrc = useMemo(() => getImageSrc(result?.annotatedImageBase64), [result]);
-    const gradCamSrc = useMemo(() => getImageSrc(result?.gradCamBase64), [result]);
+    const originalSrc = useMemo(
+        () => getImageSrc(result?.image_urls?.original_url),
+        [result]
+    );
+    const annotatedSrc = useMemo(
+        () => getImageSrc(result?.image_urls?.yolo_annotated_url),
+        [result]
+    );
+    const gradCamSrc = useMemo(
+        () => getImageSrc(result?.image_urls?.gradcam_overlay_url),
+        [result]
+    );
     const detections = result?.detections || [];
 
     const handleRefresh = () => {
@@ -254,7 +277,9 @@ export default function ResultsPage() {
                         disabled={refreshing}
                         className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 font-semibold hover:bg-gray-200 disabled:opacity-50 flex items-center gap-2"
                     >
-                        <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+                        <RefreshCw
+                            className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`}
+                        />
                         Refresh
                     </button>
                     <button
@@ -273,7 +298,8 @@ export default function ResultsPage() {
                         Pediatric Wrist Fracture Analysis
                     </h2>
                     <p className="mt-2 text-[var(--text-soft)]">
-                        AI-assisted fracture detection with two‑stage pipeline (EfficientNet‑B3 + YOLOv8).
+                        AI-assisted fracture detection with two‑stage pipeline
+                        (EfficientNet‑B3 + YOLOv8).
                     </p>
                 </div>
 
@@ -283,7 +309,9 @@ export default function ResultsPage() {
                         icon={<Activity className="w-5 h-5" />}
                         label="Final Result"
                         value={result.final_result || "Unknown"}
-                        valueClassName={result.is_fracture ? "text-red-600" : "text-green-600"}
+                        valueClassName={
+                            result.is_fracture ? "text-red-600" : "text-green-600"
+                        }
                     />
                     <SummaryCard
                         icon={<FileBarChart2 className="w-5 h-5" />}
@@ -322,7 +350,11 @@ export default function ResultsPage() {
                         title="Uploaded Image"
                         content={
                             originalSrc ? (
-                                <img src={originalSrc} alt="Original" className="rounded-2xl shadow w-full object-contain max-h-[420px]" />
+                                <img
+                                    src={originalSrc}
+                                    alt="Original"
+                                    className="rounded-2xl shadow w-full object-contain max-h-[420px]"
+                                />
                             ) : (
                                 <EmptyImageMessage text="Original image not available" />
                             )
@@ -332,19 +364,27 @@ export default function ResultsPage() {
                         title="YOLO Annotated Image"
                         content={
                             annotatedSrc ? (
-                                <img src={annotatedSrc} alt="Annotated" className="rounded-2xl shadow w-full object-contain max-h-[420px]" />
+                                <img
+                                    src={annotatedSrc}
+                                    alt="Annotated"
+                                    className="rounded-2xl shadow w-full object-contain max-h-[420px]"
+                                />
                             ) : (
                                 <EmptyImageMessage text="Annotated image not available" />
                             )
                         }
                     />
                     <ImagePanel
-                        title="Grad-CAM Heatmap"
+                        title="Grad‑CAM Heatmap"
                         content={
                             gradCamSrc ? (
-                                <img src={gradCamSrc} alt="Gradcam" className="rounded-2xl shadow w-full object-contain max-h-[420px]" />
+                                <img
+                                    src={gradCamSrc}
+                                    alt="Gradcam"
+                                    className="rounded-2xl shadow w-full object-contain max-h-[420px]"
+                                />
                             ) : (
-                                <EmptyImageMessage text="Grad-CAM not available" />
+                                <EmptyImageMessage text="Grad‑CAM not available" />
                             )
                         }
                     />
@@ -358,12 +398,14 @@ export default function ResultsPage() {
                             <h3 className="text-xl font-bold">AI Interpretation</h3>
                         </div>
                         <p className="mt-5 text-sm leading-7 text-[var(--foreground)]">
-                            {result.summary || "Suspicious fracture detected in wrist radiograph."}
+                            {result.summary ||
+                                "Suspicious fracture detected in wrist radiograph."}
                         </p>
                         <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
                             <p className="font-semibold">Recommendation</p>
                             <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">
-                                {result.recommendation || "Clinical review recommended."}
+                                {result.recommendation ||
+                                    "Clinical review recommended."}
                             </p>
                         </div>
                     </div>
@@ -377,22 +419,47 @@ export default function ResultsPage() {
                             <DetailRow label="Case ID" value={result.case_id || "N/A"} />
                             <DetailRow label="Filename" value={result.filename || "N/A"} />
                             <DetailRow label="Timestamp" value={result.timestamp || "N/A"} />
-                            <DetailRow label="Aspect Ratio" value={result.aspect_ratio || "N/A"} />
-                            <DetailRow label="Image Size" value={`${result.image_width} × ${result.image_height}`} />
-                            <DetailRow label="File Size" value={`${result.file_size_kb} KB`} />
-                            <DetailRow label="Normal Probability" value={`${result.normal_probability?.toFixed(2) ?? 0}%`} />
-                            <DetailRow label="YOLO Max Confidence" value={`${result.yolo_confidence?.toFixed(2) ?? 0}%`} />
+                            <DetailRow
+                                label="Aspect Ratio"
+                                value={result.aspect_ratio || "N/A"}
+                            />
+                            <DetailRow
+                                label="Image Size"
+                                value={`${result.image_width} × ${result.image_height}`}
+                            />
+                            <DetailRow
+                                label="File Size"
+                                value={`${result.file_size_kb} KB`}
+                            />
+                            <DetailRow
+                                label="Normal Probability"
+                                value={`${result.normal_probability?.toFixed(2) ?? 0}%`}
+                            />
+                            <DetailRow
+                                label="YOLO Max Confidence"
+                                value={`${result.yolo_confidence?.toFixed(2) ?? 0}%`}
+                            />
                         </div>
 
                         {/* Two-stage pipeline summary */}
                         <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
                             <div className="flex items-center gap-2">
                                 <Layers className="w-4 h-4 text-[var(--primary)]" />
-                                <p className="font-semibold text-sm">Two‑Stage Pipeline</p>
+                                <p className="font-semibold text-sm">
+                                    Two‑Stage Pipeline
+                                </p>
                             </div>
                             <div className="mt-3 text-sm text-[var(--text-soft)] space-y-1">
-                                <p>📊 EfficientNet‑B3: {result.stage1_efficientnet?.confidence_level || "N/A"} confidence</p>
-                                <p>🎯 YOLOv8: {result.detections_count} region{result.detections_count !== 1 ? "s" : ""} localized</p>
+                                <p>
+                                    📊 EfficientNet‑B3:{" "}
+                                    {result.stage1_efficientnet?.confidence_level ||
+                                        "N/A"}{" "}
+                                    confidence
+                                </p>
+                                <p>
+                                    🎯 YOLOv8: {result.detections_count} region
+                                    {result.detections_count !== 1 ? "s" : ""} localized
+                                </p>
                             </div>
                         </div>
 
@@ -402,7 +469,8 @@ export default function ResultsPage() {
                                 <p className="font-semibold text-sm">Clinical Note</p>
                             </div>
                             <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">
-                                MEDORA is an AI decision-support system. Final diagnosis must be validated by a radiologist or clinician.
+                                MEDORA is an AI decision‑support system. Final diagnosis
+                                must be validated by a radiologist or clinician.
                             </p>
                         </div>
                     </div>
@@ -410,24 +478,47 @@ export default function ResultsPage() {
 
                 {/* Detection Details */}
                 <div className="mt-8 rounded-3xl bg-[var(--card)] p-6">
-                    <h3 className="text-xl font-bold text-[var(--foreground)]">Detection Details</h3>
+                    <h3 className="text-xl font-bold text-[var(--foreground)]">
+                        Detection Details
+                    </h3>
                     {detections.length > 0 ? (
                         <div className="mt-5 grid gap-4">
                             {detections.map((det, index) => (
-                                <div key={index} className="bg-white rounded-2xl border border-[var(--border)] p-5">
+                                <div
+                                    key={index}
+                                    className="bg-white rounded-2xl border border-[var(--border)] p-5"
+                                >
                                     <div className="flex items-center justify-between flex-wrap gap-3">
-                                        <h4 className="font-bold text-[var(--primary-dark)]">Region {index + 1}</h4>
-                                        <span className="text-sm font-semibold text-red-600">{det.confidence?.toFixed(2) || 0}%</span>
+                                        <h4 className="font-bold text-[var(--primary-dark)]">
+                                            Region {index + 1}
+                                        </h4>
+                                        <span className="text-sm font-semibold text-red-600">
+                                            {det.confidence?.toFixed(2) || 0}%
+                                        </span>
                                     </div>
                                     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-                                        <MiniDetail label="Center X" value={`${det.center_x ?? 0}`} />
-                                        <MiniDetail label="Center Y" value={`${det.center_y ?? 0}`} />
-                                        <MiniDetail label="Width" value={`${det.width_px ?? 0}px`} />
-                                        <MiniDetail label="Height" value={`${det.height_px ?? 0}px`} />
+                                        <MiniDetail
+                                            label="Center X"
+                                            value={`${det.center_x ?? 0}`}
+                                        />
+                                        <MiniDetail
+                                            label="Center Y"
+                                            value={`${det.center_y ?? 0}`}
+                                        />
+                                        <MiniDetail
+                                            label="Width"
+                                            value={`${det.width_px ?? 0}px`}
+                                        />
+                                        <MiniDetail
+                                            label="Height"
+                                            value={`${det.height_px ?? 0}px`}
+                                        />
                                     </div>
                                     {det.bbox && (
                                         <div className="mt-4 rounded-xl bg-[var(--background)] border border-[var(--border)] p-4">
-                                            <p className="text-xs text-[var(--text-soft)]">Bounding Box</p>
+                                            <p className="text-xs text-[var(--text-soft)]">
+                                                Bounding Box
+                                            </p>
                                             <p className="mt-1 text-sm font-medium break-all">
                                                 [{det.bbox.join(", ")}]
                                             </p>
@@ -437,16 +528,24 @@ export default function ResultsPage() {
                             ))}
                         </div>
                     ) : (
-                        <p className="mt-4 text-sm text-[var(--text-soft)]">No detections available.</p>
+                        <p className="mt-4 text-sm text-[var(--text-soft)]">
+                            No detections available.
+                        </p>
                     )}
                 </div>
 
                 {/* Actions */}
                 <div className="flex flex-col sm:flex-row gap-4 mt-8">
-                    <button onClick={() => router.push("/upload")} className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium">
+                    <button
+                        onClick={() => router.push("/upload")}
+                        className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium"
+                    >
                         Analyze Another
                     </button>
-                    <button onClick={() => window.print()} className="px-5 py-3 rounded-2xl bg-[var(--primary-dark)] text-white font-semibold">
+                    <button
+                        onClick={() => window.print()}
+                        className="px-5 py-3 rounded-2xl bg-[var(--primary-dark)] text-white font-semibold"
+                    >
                         Download Report
                     </button>
                 </div>
@@ -456,7 +555,17 @@ export default function ResultsPage() {
 }
 
 // UI Components (unchanged)
-function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
+function SummaryCard({
+    icon,
+    label,
+    value,
+    valueClassName = "text-[var(--foreground)]",
+}: {
+    icon: React.ReactNode;
+    label: string;
+    value: string;
+    valueClassName?: string;
+}) {
     return (
         <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5">
             <div className="flex items-center gap-2 text-[var(--primary)]">
@@ -468,10 +577,18 @@ function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foregro
     );
 }
 
-function ImagePanel({ title, content }: { title: string; content: React.ReactNode }) {
+function ImagePanel({
+    title,
+    content,
+}: {
+    title: string;
+    content: React.ReactNode;
+}) {
     return (
         <div className="rounded-3xl bg-[var(--card)] p-5">
-            <h3 className="text-sm font-medium text-[var(--text-soft)] mb-4">{title}</h3>
+            <h3 className="text-sm font-medium text-[var(--text-soft)] mb-4">
+                {title}
+            </h3>
             {content}
         </div>
     );
