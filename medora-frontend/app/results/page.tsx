@@ -17,7 +17,7 @@ import {
     RefreshCw,
 } from "lucide-react";
 
-// Types
+// --- Types matching your Firestore document ---
 type Detection = {
     bbox: number[];
     center_x: number;
@@ -73,15 +73,10 @@ type AnalysisResult = {
     yolo_confidence: number;
 };
 
+// Simple helper: just return the URL as is (it's already a data URL)
 function getImageSrc(value?: string) {
     if (!value) return "";
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-    if (trimmed.startsWith("data:image/")) return trimmed;
-    if (trimmed.length > 100 && !trimmed.includes("http://") && !trimmed.includes("https://")) {
-        return `data:image/jpeg;base64,${trimmed}`;
-    }
-    return trimmed;
+    return value; // Your Firestore already stores full data:image/... URLs
 }
 
 export default function ResultsPage() {
@@ -113,6 +108,8 @@ export default function ResultsPage() {
         const stage1 = data.stage1_efficientnet || {};
         const stage2 = data.stage2_yolo || {};
         const imageUrls = data.image_urls || {};
+
+        console.log("Image URLs from Firestore:", imageUrls); // Debug log
 
         let detections: Detection[] = [];
         if (Array.isArray(data.detections)) detections = data.detections;
@@ -181,33 +178,22 @@ export default function ResultsPage() {
                 return;
             }
 
-            // Find a valid document (with necessary fields)
+            // Find a valid document (with image_urls and final_result)
             let validDoc = null;
             for (const docSnap of snapshot.docs) {
                 const data = docSnap.data();
-                if (data.final_result && data.fracture_probability !== undefined && data.image_urls) {
+                if (data.image_urls && data.final_result) {
                     validDoc = { id: docSnap.id, data };
-                    console.log("✅ Using valid doc:", docSnap.id);
+                    console.log("✅ Using valid doc with image_urls:", docSnap.id);
                     setDebugInfo(`Using document: ${docSnap.id}`);
                     break;
                 }
             }
 
             if (!validDoc) {
-                // Fallback to the most recent by timestamp if possible
-                const docsWithTimestamp = snapshot.docs.filter(d => d.data().timestamp);
-                if (docsWithTimestamp.length) {
-                    docsWithTimestamp.sort((a, b) => {
-                        const ta = a.data().timestamp || "";
-                        const tb = b.data().timestamp || "";
-                        return tb.localeCompare(ta);
-                    });
-                    validDoc = { id: docsWithTimestamp[0].id, data: docsWithTimestamp[0].data() };
-                    console.log("⚠️ Using fallback (timestamp):", validDoc.id);
-                } else {
-                    validDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
-                    console.log("⚠️ Using first document as fallback:", validDoc.id);
-                }
+                // Fallback to the first document (maybe incomplete)
+                validDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
+                console.log("⚠️ Using first document as fallback (may lack images)");
                 setDebugInfo(`Fallback document: ${validDoc.id}`);
             }
 
@@ -231,9 +217,11 @@ export default function ResultsPage() {
     const annotatedSrc = useMemo(() => getImageSrc(result?.image_urls?.yolo_annotated_url), [result]);
     const gradCamSrc = useMemo(() => getImageSrc(result?.image_urls?.gradcam_overlay_url), [result]);
 
+    console.log("Image sources:", { originalSrc, annotatedSrc, gradCamSrc }); // Debug
+
     const handleRefresh = () => fetchLatestResult();
 
-    // Loading / Error UI
+    // Loading UI
     if (loading) {
         return (
             <main className="min-h-screen bg-[var(--background)] flex items-center justify-center">
@@ -266,7 +254,7 @@ export default function ResultsPage() {
     }
 
     // ------------------------------
-    // Success UI (unchanged)
+    // Success UI
     // ------------------------------
     return (
         <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
@@ -292,6 +280,7 @@ export default function ResultsPage() {
                     {debugInfo && <p className="mt-2 text-xs text-gray-400">{debugInfo}</p>}
                 </div>
 
+                {/* Summary Cards */}
                 <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-8">
                     <SummaryCard icon={<Activity className="w-5 h-5" />} label="Final Result" value={result.final_result} valueClassName={result.is_fracture ? "text-red-600" : "text-green-600"} />
                     <SummaryCard icon={<FileBarChart2 className="w-5 h-5" />} label="Fracture Probability" value={`${result.fracture_probability.toFixed(1)}%`} />
@@ -301,12 +290,26 @@ export default function ResultsPage() {
 
                 {result.severity && <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">⚠️ {result.severity}</div>}
 
+                {/* Images - now with onError fallback */}
                 <div className="grid lg:grid-cols-3 gap-6 mt-8">
-                    <ImagePanel title="Uploaded Image" content={originalSrc ? <img src={originalSrc} alt="Original" className="rounded-2xl shadow w-full object-contain max-h-[420px]" /> : <EmptyImageMessage text="Original image not available" />} />
-                    <ImagePanel title="YOLO Annotated Image" content={annotatedSrc ? <img src={annotatedSrc} alt="Annotated" className="rounded-2xl shadow w-full object-contain max-h-[420px]" /> : <EmptyImageMessage text="Annotated image not available" />} />
-                    <ImagePanel title="Grad‑CAM Heatmap" content={gradCamSrc ? <img src={gradCamSrc} alt="Gradcam" className="rounded-2xl shadow w-full object-contain max-h-[420px]" /> : <EmptyImageMessage text="Grad‑CAM not available" />} />
+                    <ImagePanel title="Uploaded Image" content={
+                        originalSrc ? (
+                            <img src={originalSrc} alt="Original" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={(e) => { console.error("Original image failed to load"); e.currentTarget.src = ""; }} />
+                        ) : <EmptyImageMessage text="Original image not available" />
+                    } />
+                    <ImagePanel title="YOLO Annotated Image" content={
+                        annotatedSrc ? (
+                            <img src={annotatedSrc} alt="Annotated" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={(e) => console.error("YOLO image failed to load")} />
+                        ) : <EmptyImageMessage text="Annotated image not available" />
+                    } />
+                    <ImagePanel title="Grad‑CAM Heatmap" content={
+                        gradCamSrc ? (
+                            <img src={gradCamSrc} alt="GradCAM" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={(e) => console.error("GradCAM image failed to load")} />
+                        ) : <EmptyImageMessage text="Grad‑CAM not available" />
+                    } />
                 </div>
 
+                {/* AI Interpretation + Technical Details */}
                 <div className="grid lg:grid-cols-2 gap-6 mt-8">
                     <div className="rounded-3xl bg-[var(--card)] p-6">
                         <div className="flex items-center gap-2"><Brain className="w-5 h-5 text-[var(--primary)]" /><h3 className="text-xl font-bold">AI Interpretation</h3></div>
@@ -342,6 +345,7 @@ export default function ResultsPage() {
                     </div>
                 </div>
 
+                {/* Detection Details */}
                 <div className="mt-8 rounded-3xl bg-[var(--card)] p-6">
                     <h3 className="text-xl font-bold text-[var(--foreground)]">Detection Details</h3>
                     {result.detections.length > 0 ? (
@@ -365,6 +369,7 @@ export default function ResultsPage() {
                     ) : <p className="mt-4 text-sm text-[var(--text-soft)]">No detections available.</p>}
                 </div>
 
+                {/* Actions */}
                 <div className="flex flex-col sm:flex-row gap-4 mt-8">
                     <button onClick={() => router.push("/upload")} className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium">Analyze Another</button>
                     <button onClick={() => window.print()} className="px-5 py-3 rounded-2xl bg-[var(--primary-dark)] text-white font-semibold">Download Report</button>
@@ -374,7 +379,7 @@ export default function ResultsPage() {
     );
 }
 
-// Helper components (no changes)
+// Helper components (unchanged)
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5"><div className="flex items-center gap-2 text-[var(--primary)]">{icon}<span className="text-sm font-medium">{label}</span></div><p className={`mt-4 text-2xl font-bold ${valueClassName}`}>{value}</p></div>;
 }
