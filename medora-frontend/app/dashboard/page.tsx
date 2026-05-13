@@ -190,7 +190,6 @@ export default function DashboardPage() {
     return () => unsubCases();
   }, [firebaseUser]);
 
-  // Compute statistics
   const stats = useMemo(() => {
     const total = cases.length;
     const fractures = cases.filter((item) => item.prediction === "Fracture").length;
@@ -238,24 +237,11 @@ export default function DashboardPage() {
     [stats]
   );
 
-  const confidenceData = useMemo(() => {
-    return recentCases.map((item, index) => ({
-      name: `Case ${index + 1}`,
-      confidence: Number((item.confidence * 100).toFixed(1)),
-    }));
-  }, [recentCases]);
-
   const formatDate = (value?: string | null) => {
     if (!value) return "—";
     const date = parseDate(value);
     return date ? date.toLocaleDateString() : "—";
   };
-
-  // Get latest case for images (the first one)
-  const latestCaseForImages = cases[0];
-  const originalSrc = latestCaseForImages?.originalImageUrl || "";
-  const annotatedSrc = latestCaseForImages?.annotatedImageUrl || "";
-  const gradCamSrc = latestCaseForImages?.gradCamUrl || "";
 
   const handleLogout = async () => {
     try {
@@ -398,48 +384,6 @@ export default function DashboardPage() {
           <InfoStripCard title="AI safety note" value="Assistive" icon={<ShieldCheck className="h-5 w-5" />} note="Not a replacement for clinician review" />
         </div>
 
-        {/* ========== NEW: THREE IMAGE TILES (same as Results page) ========== */}
-        <div className="mt-6">
-          <div className="grid lg:grid-cols-3 gap-5">
-            <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
-              <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
-                <h3 className="font-semibold text-sm">Original X-Ray</h3>
-              </div>
-              <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
-                {originalSrc ? (
-                  <img src={originalSrc} alt="Original" className="max-h-[200px] w-auto object-contain rounded" onError={(e) => console.error("Original image failed")} />
-                ) : (
-                  <div className="text-center text-[var(--text-soft)] text-sm">No original image</div>
-                )}
-              </div>
-            </div>
-            <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
-              <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
-                <h3 className="font-semibold text-sm">YOLO Detection</h3>
-              </div>
-              <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
-                {annotatedSrc ? (
-                  <img src={annotatedSrc} alt="Annotated" className="max-h-[200px] w-auto object-contain rounded" onError={(e) => console.error("Annotated image failed")} />
-                ) : (
-                  <div className="text-center text-[var(--text-soft)] text-sm">No annotated image</div>
-                )}
-              </div>
-            </div>
-            <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
-              <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
-                <h3 className="font-semibold text-sm">Grad-CAM Heatmap</h3>
-              </div>
-              <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
-                {gradCamSrc ? (
-                  <img src={gradCamSrc} alt="GradCAM" className="max-h-[200px] w-auto object-contain rounded" onError={(e) => console.error("GradCAM image failed")} />
-                ) : (
-                  <div className="text-center text-[var(--text-soft)] text-sm">No heatmap available</div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Charts row */}
         <div className="mt-6 grid gap-4 xl:grid-cols-3">
           <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)] xl:col-span-2">
@@ -493,39 +437,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Confidence chart + insight cards */}
-        <div className="mt-6 grid gap-4 xl:grid-cols-3">
-          <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)] xl:col-span-2">
-            <div className="mb-4 flex items-center gap-2">
-              <Brain className="h-5 w-5 text-[var(--primary)]" />
-              <h3 className="text-lg font-bold text-[var(--foreground)]">Recent Case Confidence (Fracture Probability)</h3>
-            </div>
-            <div className="h-[260px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={confidenceData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="name" />
-                  <YAxis domain={[0, 100]} />
-                  <Tooltip formatter={(value) => [`${value}%`, "Confidence"]} />
-                  <Bar dataKey="confidence" fill="#7c6ee6" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          <div className="grid gap-4">
-            <MobileInsightCard
-              title="Model Pipeline"
-              desc="EfficientNet-B3 performs screening, followed by YOLOv8 localization for suspected fracture regions."
-              icon={<Brain className="h-5 w-5" />}
-            />
-            <MobileInsightCard
-              title="Clinical Safety"
-              desc="MEDORA supports clinicians with AI assistance and must not replace expert medical judgment."
-              icon={<ShieldCheck className="h-5 w-5" />}
-            />
-          </div>
-        </div>
+        {/* ========== REMOVED: Recent Case Confidence chart and insight cards ========== */}
 
         {/* Action cards */}
         <div className="mt-8 grid gap-4 md:grid-cols-3">
@@ -668,7 +580,7 @@ export default function DashboardPage() {
   );
 }
 
-// ---------- UI Components (unchanged) ----------
+// ---------- Helper components (unchanged) ----------
 function StatCard({ title, value, icon, color }: { title: string; value: number; icon: React.ReactNode; color: string }) {
   return (
     <div className="rounded-[24px] bg-white p-4 shadow-[var(--shadow-card)] animate-fade-in-up sm:p-5">
