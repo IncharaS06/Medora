@@ -8,8 +8,7 @@ import {
     collection,
     getDocs,
     query,
-    Timestamp,
-    where,
+    DocumentData,
 } from "firebase/firestore";
 import {
     ArrowLeft,
@@ -47,22 +46,18 @@ type RawBoxType =
 
 type CaseItem = {
     id: string;
-    userId?: string;
-    userEmail?: string;
-    prediction?: string;      // from final_result
-    confidence?: number;      // normalized 0-1 from fracture_probability
-    boxes?: RawBoxType[];     // converted from detections
-    originalImageBase64?: string;
-    annotatedImageBase64?: string;
-    gradCamBase64?: string;
-    riskLevel?: string;       // from risk_level
-    modelName?: string;
-    summary?: string;
-    recommendation?: string;
-    createdAt?: Timestamp | string | null;
+    prediction: string;           // from final_result
+    confidence: number;           // 0-1 from fracture_probability
+    boxes: RawBoxType[];          // converted from detections
+    originalImageUrl: string;
+    annotatedImageUrl: string;
+    gradCamUrl: string;
+    riskLevel: string;
+    modelName: string;
+    summary: string;
+    recommendation: string;
+    timestamp: string;
     groundTruth?: string;
-    actualLabel?: string;
-    trueLabel?: string;
 };
 
 type BoxType = {
@@ -72,26 +67,17 @@ type BoxType = {
     y2: number;
 };
 
-function getImageSrc(value?: string) {
-    if (!value) return "";
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-    if (trimmed.startsWith("data:image/")) return trimmed;
-    if (
-        trimmed.length > 100 &&
-        !trimmed.includes("http://") &&
-        !trimmed.includes("https://") &&
-        !trimmed.includes("\\") &&
-        !trimmed.includes(" ")
-    ) {
-        return `data:image/jpeg;base64,${trimmed}`;
+function getImageSrc(url: string | undefined) {
+    if (!url) return "";
+    if (url.startsWith("data:image/")) return url;
+    if (typeof url === "string" && /^[A-Za-z0-9+/=]+$/.test(url)) {
+        return `data:image/jpeg;base64,${url}`;
     }
-    return "";
+    return url;
 }
 
 function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
     if (!Array.isArray(boxes)) return [];
-
     return boxes
         .map((box) => {
             if (Array.isArray(box)) {
@@ -118,20 +104,10 @@ function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
         );
 }
 
-function getSortableTime(value?: Timestamp | string | null) {
-    if (!value) return 0;
-    if (typeof value === "string") {
-        const d = new Date(value.replace(" ", "T"));
-        return isNaN(d.getTime()) ? 0 : d.getTime();
-    }
-    if (typeof value === "object" && value && "toDate" in value) {
-        try {
-            return value.toDate().getTime();
-        } catch {
-            return 0;
-        }
-    }
-    return 0;
+function parseTimestamp(timestamp?: string): number {
+    if (!timestamp) return 0;
+    const date = new Date(timestamp.replace(" ", "T"));
+    return isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function normalizeBinaryLabel(value?: string) {
@@ -142,16 +118,14 @@ function normalizeBinaryLabel(value?: string) {
 }
 
 function getGroundTruth(item: CaseItem) {
-    return normalizeBinaryLabel(
-        item.groundTruth || item.actualLabel || item.trueLabel
-    );
+    return normalizeBinaryLabel(item.groundTruth);
 }
 
 function computeBinaryMetrics(cases: CaseItem[]) {
     const evaluated = cases
         .map((item) => {
             const gt = getGroundTruth(item);
-            const score = Number(item.confidence ?? 0);
+            const score = item.confidence;
             const predLabel = normalizeBinaryLabel(item.prediction);
             return {
                 gt,
@@ -231,15 +205,6 @@ function computePrCurve(rows: { gt: number | null; score: number }[]) {
     });
 }
 
-function getReadableFirestoreError(err: any) {
-    const code = err?.code || "";
-    if (code.includes("permission-denied"))
-        return "Permission denied. Check Firestore rules.";
-    if (code.includes("unavailable"))
-        return "Firestore is temporarily unavailable.";
-    return "Failed to fetch research data from Firestore.";
-}
-
 export default function ResearchPage() {
     const router = useRouter();
     const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
@@ -262,17 +227,15 @@ export default function ResearchPage() {
         const fetchCases = async () => {
             try {
                 if (!firebaseUser) return;
-                const q = query(
-                    collection(db, "cases"),
-                    where("userId", "==", firebaseUser.uid)
-                );
+
+                // Query all cases, ordered by timestamp descending
+                const q = query(collection(db, "cases"));
                 const snap = await getDocs(q);
 
                 const items: CaseItem[] = snap.docs.map((doc) => {
-                    const data = doc.data();
+                    const data = doc.data() as DocumentData;
 
-                    // --- Transform backend fields to UI expected fields ---
-                    // 1. prediction from final_result
+                    // Prediction from final_result
                     const rawResult = data.final_result || "Unknown";
                     const prediction =
                         rawResult.toLowerCase() === "fracture"
@@ -281,21 +244,20 @@ export default function ResearchPage() {
                             ? "Normal"
                             : "Unknown";
 
-                    // 2. confidence from fracture_probability (0-100) -> 0-1
-                    const fractureProb =
-                        typeof data.fracture_probability === "number"
-                            ? data.fracture_probability
-                            : 0;
+                    // Confidence from fracture_probability (0-100) -> 0-1
+                    const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
                     const confidence = fractureProb / 100;
 
-                    // 3. parse createdAt (could be string "2026-05-12 05:53:16" or Timestamp)
-                    let createdAt = data.createdAt || data.timestamp || null;
-                    if (typeof createdAt === "string") {
-                        const parsed = new Date(createdAt.replace(" ", "T"));
-                        createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
-                    }
+                    // Timestamp string
+                    const timestamp = data.timestamp || "";
 
-                    // 4. convert detections to boxes
+                    // Image URLs from nested object
+                    const imageUrls = data.image_urls || {};
+                    const originalImageUrl = imageUrls.original_url || "";
+                    const annotatedImageUrl = imageUrls.yolo_annotated_url || "";
+                    const gradCamUrl = imageUrls.gradcam_overlay_url || "";
+
+                    // Convert detections to boxes
                     let boxes: RawBoxType[] = [];
                     const detections = data.detections;
                     if (Array.isArray(detections)) {
@@ -307,40 +269,38 @@ export default function ResearchPage() {
                         }));
                     }
 
-                    // 5. risk level
-                    const riskLevel = data.risk_level || data.riskLevel || "";
-
-                    // 6. summary & recommendation
+                    // Risk level, summary, recommendation
+                    const riskLevel = data.risk_level || "";
                     const summary = data.summary || "";
                     const recommendation = data.recommendation || "";
 
+                    // Ground truth (if you add this field later)
+                    const groundTruth = data.groundTruth || data.actualLabel || data.trueLabel || null;
+
                     return {
                         id: doc.id,
-                        userId: data.userId || "",
-                        userEmail: data.userEmail || "",
                         prediction,
                         confidence,
                         boxes,
-                        originalImageBase64: data.originalImageBase64 || "",
-                        annotatedImageBase64: data.annotatedImageBase64 || "",
-                        gradCamBase64: data.gradCamBase64 || "",
+                        originalImageUrl,
+                        annotatedImageUrl,
+                        gradCamUrl,
                         riskLevel,
-                        modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
+                        modelName: "EfficientNet-B3 + YOLOv8",
                         summary,
                         recommendation,
-                        createdAt,
-                        groundTruth: data.groundTruth || data.actualLabel || data.trueLabel || null,
+                        timestamp,
+                        groundTruth,
                     };
                 });
 
-                items.sort(
-                    (a, b) => getSortableTime(b.createdAt) - getSortableTime(a.createdAt)
-                );
+                // Sort by timestamp descending
+                items.sort((a, b) => parseTimestamp(b.timestamp) - parseTimestamp(a.timestamp));
                 setCases(items);
                 setError("");
             } catch (err) {
                 console.error(err);
-                setError(getReadableFirestoreError(err));
+                setError("Failed to load research data from Firestore.");
             } finally {
                 setLoading(false);
             }
@@ -350,21 +310,15 @@ export default function ResearchPage() {
 
     const latestCase = useMemo(() => (cases.length ? cases[0] : null), [cases]);
     const safeBoxes = useMemo(() => normalizeBoxes(latestCase?.boxes), [latestCase]);
-    const annotatedSrc = useMemo(
-        () => getImageSrc(latestCase?.annotatedImageBase64),
-        [latestCase]
-    );
-    const gradCamSrc = useMemo(
-        () => getImageSrc(latestCase?.gradCamBase64),
-        [latestCase]
-    );
+    const annotatedSrc = useMemo(() => getImageSrc(latestCase?.annotatedImageUrl), [latestCase]);
+    const gradCamSrc = useMemo(() => getImageSrc(latestCase?.gradCamUrl), [latestCase]);
     const binaryMetrics = useMemo(() => computeBinaryMetrics(cases), [cases]);
     const rocData = useMemo(
         () =>
             computeRocCurve(
                 cases.map((c) => ({
                     gt: getGroundTruth(c),
-                    score: Number(c.confidence ?? 0),
+                    score: c.confidence,
                 }))
             ),
         [cases]
@@ -374,7 +328,7 @@ export default function ResearchPage() {
             computePrCurve(
                 cases.map((c) => ({
                     gt: getGroundTruth(c),
-                    score: Number(c.confidence ?? 0),
+                    score: c.confidence,
                 }))
             ),
         [cases]
@@ -397,7 +351,7 @@ export default function ResearchPage() {
             { range: "0.8-1.0", count: 0 },
         ];
         for (const item of cases) {
-            const c = Number(item.confidence ?? 0);
+            const c = item.confidence;
             if (c < 0.2) bins[0].count++;
             else if (c < 0.4) bins[1].count++;
             else if (c < 0.6) bins[2].count++;
@@ -407,7 +361,7 @@ export default function ResearchPage() {
         return bins;
     }, [cases]);
 
-    const latestConfidence = Number(latestCase?.confidence ?? 0);
+    const latestConfidence = latestCase?.confidence ?? 0;
     const latestRisk =
         latestCase?.riskLevel ||
         (latestConfidence >= 0.8
@@ -415,6 +369,7 @@ export default function ResearchPage() {
             : latestConfidence >= 0.5
             ? "Moderate"
             : "Low");
+
     const hasGroundTruth = binaryMetrics.evaluatedCount > 0;
 
     if (loading) {
