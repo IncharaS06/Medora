@@ -10,8 +10,7 @@ import {
     limit,
     orderBy,
     query,
-    Timestamp,
-    where,
+    DocumentData,
 } from "firebase/firestore";
 import {
     ArrowLeft,
@@ -42,20 +41,17 @@ type BoxType = {
 
 type ResultType = {
     id?: string;
-    userId?: string;
-    userEmail?: string;
-    patientName?: string;
     prediction: string;          // from final_result
     confidence: number;          // normalized 0-1 from fracture_probability
     boxes?: RawBoxType[];        // converted from detections
-    originalImageBase64?: string;
-    annotatedImageBase64?: string;
-    gradCamBase64?: string;
+    originalImageUrl: string;
+    annotatedImageUrl: string;
+    gradCamUrl: string;
     riskLevel?: string;          // from risk_level
     modelName?: string;
     summary?: string;
     recommendation?: string;
-    createdAt?: Timestamp | string | null;
+    timestamp?: string;
 };
 
 type ViewMode = "original" | "annotated" | "gradcam";
@@ -89,35 +85,22 @@ function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
         );
 }
 
-function getImageSrc(value?: string) {
-    if (!value) return "";
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-    if (trimmed.startsWith("data:image/")) return trimmed;
-    const looksLikeBase64 =
-        trimmed.length > 100 &&
-        !trimmed.includes("http://") &&
-        !trimmed.includes("https://") &&
-        !trimmed.includes("\\") &&
-        !trimmed.includes(" ");
-    if (looksLikeBase64) {
-        return `data:image/jpeg;base64,${trimmed}`;
+function getImageSrc(url: string | undefined): string {
+    if (!url) return "";
+    if (url.startsWith("data:image/")) return url;
+    if (typeof url === "string" && /^[A-Za-z0-9+/=]+$/.test(url)) {
+        return `data:image/jpeg;base64,${url}`;
     }
-    return "";
+    return url;
 }
 
 function getReadableFirestoreError(err: any) {
     const code = err?.code || "";
-    if (code.includes("permission-denied")) {
-        return "Permission denied while reading Firestore data. Check Firestore rules.";
-    }
-    if (code.includes("failed-precondition")) {
-        return "Firestore index or query requirement not satisfied. Create the required composite index for userId + createdAt.";
-    }
-    if (code.includes("unavailable")) {
+    if (code.includes("permission-denied"))
+        return "Permission denied. Check Firestore rules.";
+    if (code.includes("unavailable"))
         return "Firestore is temporarily unavailable.";
-    }
-    return "Failed to load viewer data from database.";
+    return "Failed to load viewer data.";
 }
 
 export default function ViewerPage() {
@@ -146,10 +129,10 @@ export default function ViewerPage() {
             try {
                 if (!firebaseUser) return;
 
+                // Query all cases, order by timestamp descending, limit 1
                 const q = query(
                     collection(db, "cases"),
-                    where("userId", "==", firebaseUser.uid),
-                    orderBy("createdAt", "desc"),
+                    orderBy("timestamp", "desc"),
                     limit(1)
                 );
 
@@ -162,7 +145,7 @@ export default function ViewerPage() {
                 }
 
                 const docSnap = snap.docs[0];
-                const data = docSnap.data();
+                const data = docSnap.data() as DocumentData;
 
                 // --- Transform backend fields to UI expected fields ---
                 // 1. prediction from final_result
@@ -181,14 +164,16 @@ export default function ViewerPage() {
                         : 0;
                 const confidence = fractureProb / 100;
 
-                // 3. parse createdAt (could be string "2026-05-12 05:53:16" or Timestamp)
-                let createdAt = data.createdAt || data.timestamp || null;
-                if (typeof createdAt === "string") {
-                    const parsed = new Date(createdAt.replace(" ", "T"));
-                    createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
-                }
+                // 3. timestamp string
+                const timestamp = data.timestamp || "";
 
-                // 4. convert detections to boxes
+                // 4. image URLs from nested object
+                const imageUrls = data.image_urls || {};
+                const originalImageUrl = imageUrls.original_url || "";
+                const annotatedImageUrl = imageUrls.yolo_annotated_url || "";
+                const gradCamUrl = imageUrls.gradcam_overlay_url || "";
+
+                // 5. convert detections to boxes
                 let boxes: RawBoxType[] = [];
                 const detections = data.detections;
                 if (Array.isArray(detections)) {
@@ -200,29 +185,24 @@ export default function ViewerPage() {
                     }));
                 }
 
-                // 5. risk level
-                const riskLevel = data.risk_level || data.riskLevel || "";
-
-                // 6. summary & recommendation
+                // 6. risk level, summary, recommendation
+                const riskLevel = data.risk_level || "";
                 const summary = data.summary || "";
                 const recommendation = data.recommendation || "";
 
                 const payload: ResultType = {
                     id: docSnap.id,
-                    userId: data.userId || "",
-                    userEmail: data.userEmail || "",
-                    patientName: data.patientName || "Unknown",
                     prediction,
                     confidence,
                     boxes,
-                    originalImageBase64: data.originalImageBase64 || "",
-                    annotatedImageBase64: data.annotatedImageBase64 || "",
-                    gradCamBase64: data.gradCamBase64 || "",
+                    originalImageUrl,
+                    annotatedImageUrl,
+                    gradCamUrl,
                     riskLevel,
                     modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
                     summary,
                     recommendation,
-                    createdAt,
+                    timestamp,
                 };
 
                 setResult(payload);
@@ -239,18 +219,9 @@ export default function ViewerPage() {
 
     const safeBoxes = useMemo(() => normalizeBoxes(result?.boxes), [result]);
 
-    const originalSrc = useMemo(
-        () => getImageSrc(result?.originalImageBase64),
-        [result]
-    );
-
-    const annotatedSrc = useMemo(() => {
-        return getImageSrc(result?.annotatedImageBase64);
-    }, [result]);
-
-    const gradCamSrc = useMemo(() => {
-        return getImageSrc(result?.gradCamBase64);
-    }, [result]);
+    const originalSrc = useMemo(() => getImageSrc(result?.originalImageUrl), [result]);
+    const annotatedSrc = useMemo(() => getImageSrc(result?.annotatedImageUrl), [result]);
+    const gradCamSrc = useMemo(() => getImageSrc(result?.gradCamUrl), [result]);
 
     const currentImage = useMemo(() => {
         if (mode === "original") return originalSrc;
@@ -569,3 +540,6 @@ function SideStat({
         </div>
     );
 }
+
+
+              
