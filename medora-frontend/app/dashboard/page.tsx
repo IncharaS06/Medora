@@ -46,9 +46,9 @@ import {
 
 type CaseItem = {
   id: string;
-  prediction: string;          // from final_result
-  confidence: number;          // 0-1 from fracture_probability
-  createdAt: string | null;    // timestamp string
+  prediction: string;
+  confidence: number;
+  createdAt: string | null;
   status: string;
   riskLevel: string;
   originalImageUrl: string;
@@ -64,11 +64,6 @@ function parseDate(value?: string | null) {
   if (!value) return null;
   const d = new Date(value.replace(" ", "T"));
   return isNaN(d.getTime()) ? null : d;
-}
-
-function getSortableTime(value?: string | null) {
-  const d = parseDate(value);
-  return d ? d.getTime() : 0;
 }
 
 function getReadableFirestoreError(err: any) {
@@ -123,8 +118,6 @@ export default function DashboardPage() {
     if (!firebaseUser) return;
 
     setLoading(true);
-
-    // Query all cases, ordered by timestamp descending (most recent first)
     const q = query(collection(db, "cases"), orderBy("timestamp", "desc"));
 
     const unsubCases = onSnapshot(
@@ -134,7 +127,6 @@ export default function DashboardPage() {
           const fetchedCases: CaseItem[] = snapshot.docs.map((doc) => {
             const data = doc.data() as DocumentData;
 
-            // Prediction from final_result
             const rawResult = data.final_result || "Unknown";
             const prediction =
               rawResult.toLowerCase() === "fracture"
@@ -143,30 +135,21 @@ export default function DashboardPage() {
                 ? "Normal"
                 : "Unknown";
 
-            // Confidence from fracture_probability (0-100) -> 0-1
             const fractureProb =
               typeof data.fracture_probability === "number"
                 ? data.fracture_probability
                 : 0;
             const confidence = fractureProb / 100;
 
-            // Timestamp string
             const createdAt = data.timestamp || null;
-
-            // Image URLs from nested object
             const imageUrls = data.image_urls || {};
             const originalImageUrl = imageUrls.original_url || "";
             const annotatedImageUrl = imageUrls.yolo_annotated_url || "";
             const gradCamUrl = imageUrls.gradcam_overlay_url || "";
 
-            // Risk level
             const riskLevel = data.risk_level || "";
-
-            // Summary and recommendation
             const summary = data.summary || "";
             const recommendation = data.recommendation || "";
-
-            // Convert detections to boxes
             const boxes = normalizeBoxes(data.detections || []);
 
             return {
@@ -207,6 +190,7 @@ export default function DashboardPage() {
     return () => unsubCases();
   }, [firebaseUser]);
 
+  // Compute statistics
   const stats = useMemo(() => {
     const total = cases.length;
     const fractures = cases.filter((item) => item.prediction === "Fracture").length;
@@ -266,6 +250,12 @@ export default function DashboardPage() {
     const date = parseDate(value);
     return date ? date.toLocaleDateString() : "—";
   };
+
+  // Get latest case for images (the first one)
+  const latestCaseForImages = cases[0];
+  const originalSrc = latestCaseForImages?.originalImageUrl || "";
+  const annotatedSrc = latestCaseForImages?.annotatedImageUrl || "";
+  const gradCamSrc = latestCaseForImages?.gradCamUrl || "";
 
   const handleLogout = async () => {
     try {
@@ -406,6 +396,48 @@ export default function DashboardPage() {
           <InfoStripCard title="Total reviewed trend" value={stats.total} icon={<TrendingUp className="h-5 w-5" />} note="Live case volume from your Firestore data" />
           <InfoStripCard title="Latest activity" value={recentCases.length} icon={<CalendarDays className="h-5 w-5" />} note="Recent cases shown below" />
           <InfoStripCard title="AI safety note" value="Assistive" icon={<ShieldCheck className="h-5 w-5" />} note="Not a replacement for clinician review" />
+        </div>
+
+        {/* ========== NEW: THREE IMAGE TILES (same as Results page) ========== */}
+        <div className="mt-6">
+          <div className="grid lg:grid-cols-3 gap-5">
+            <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
+              <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
+                <h3 className="font-semibold text-sm">Original X-Ray</h3>
+              </div>
+              <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
+                {originalSrc ? (
+                  <img src={originalSrc} alt="Original" className="max-h-[200px] w-auto object-contain rounded" onError={(e) => console.error("Original image failed")} />
+                ) : (
+                  <div className="text-center text-[var(--text-soft)] text-sm">No original image</div>
+                )}
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
+              <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
+                <h3 className="font-semibold text-sm">YOLO Detection</h3>
+              </div>
+              <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
+                {annotatedSrc ? (
+                  <img src={annotatedSrc} alt="Annotated" className="max-h-[200px] w-auto object-contain rounded" onError={(e) => console.error("Annotated image failed")} />
+                ) : (
+                  <div className="text-center text-[var(--text-soft)] text-sm">No annotated image</div>
+                )}
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[var(--border)] overflow-hidden shadow-sm">
+              <div className="p-3 border-b border-[var(--border)] bg-[var(--background)]">
+                <h3 className="font-semibold text-sm">Grad-CAM Heatmap</h3>
+              </div>
+              <div className="p-3 flex items-center justify-center min-h-[220px] bg-gray-50">
+                {gradCamSrc ? (
+                  <img src={gradCamSrc} alt="GradCAM" className="max-h-[200px] w-auto object-contain rounded" onError={(e) => console.error("GradCAM image failed")} />
+                ) : (
+                  <div className="text-center text-[var(--text-soft)] text-sm">No heatmap available</div>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Charts row */}
@@ -636,7 +668,7 @@ export default function DashboardPage() {
   );
 }
 
-// ---------- UI Components (unchanged except where fields updated) ----------
+// ---------- UI Components (unchanged) ----------
 function StatCard({ title, value, icon, color }: { title: string; value: number; icon: React.ReactNode; color: string }) {
   return (
     <div className="rounded-[24px] bg-white p-4 shadow-[var(--shadow-card)] animate-fade-in-up sm:p-5">
