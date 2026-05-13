@@ -418,16 +418,9 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* ========== REMOVED: Recent Case Confidence chart and insight cards ========== */}
+        {/* ========== REMOVED: Action Cards (Upload, Research, Settings) ========== */}
 
-        {/* Action cards */}
-        <div className="mt-8 grid gap-4 md:grid-cols-3">
-          <ActionCard title="Upload Radiograph" desc="Start a new pediatric wrist fracture analysis." cta="Open Upload" onClick={() => router.push("/upload")} />
-          <ActionCard title="Research Panel" desc="Inspect metrics, performance, and evaluation outputs." cta="Open Research" onClick={() => router.push("/research")} />
-          <ActionCard title="Settings" desc="Manage model preferences, thresholds, and profile options." cta="Open Settings" onClick={() => router.push("/settings")} />
-        </div>
-
-        {/* Mobile shortcuts */}
+        {/* Mobile shortcuts – keep them for quick navigation */}
         <div className="mt-8 md:hidden">
           <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)]">
             <div className="flex items-center gap-2">
@@ -561,7 +554,7 @@ export default function DashboardPage() {
   );
 }
 
-// ---------- Helper components ----------
+// ---------- Helper components (same as before) ----------
 function StatCard({ title, value, icon, color }: { title: string; value: number; icon: React.ReactNode; color: string }) {
   return (
     <div className="rounded-[24px] bg-white p-4 shadow-[var(--shadow-card)] animate-fade-in-up sm:p-5">
@@ -585,18 +578,6 @@ function InfoStripCard({ title, value, icon, note }: { title: string; value: str
         </div>
       </div>
       <p className="mt-3 text-sm text-[var(--text-soft)]">{note}</p>
-    </div>
-  );
-}
-
-function ActionCard({ title, desc, cta, onClick }: { title: string; desc: string; cta: string; onClick: () => void }) {
-  return (
-    <div className="rounded-[24px] bg-white p-5 shadow-[var(--shadow-card)] animate-fade-in-up">
-      <h3 className="text-lg font-bold text-[var(--foreground)]">{title}</h3>
-      <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">{desc}</p>
-      <button onClick={onClick} className="mt-5 rounded-2xl bg-[var(--primary)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--primary-dark)]">
-        {cta}
-      </button>
     </div>
   );
 }
