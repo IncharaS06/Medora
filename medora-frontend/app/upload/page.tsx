@@ -1,122 +1,73 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-
+import { useRouter, useSearchParams } from "next/navigation";
 import { auth } from "@/lib/firebase";
-
-import {
-  onAuthStateChanged,
-  User,
-} from "firebase/auth";
+import { onAuthStateChanged, User } from "firebase/auth";
 
 export default function UploadPage() {
-
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const caseId = searchParams.get("case_id");
 
-  const [firebaseUser, setFirebaseUser] =
-    useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
-  const [authLoading, setAuthLoading] =
-    useState(true);
-
-  // ─────────────────────────────────────────────
-  // AUTH
-  // ─────────────────────────────────────────────
+  // Auth check
   useEffect(() => {
-
-    const unsub = onAuthStateChanged(
-      auth,
-      (user) => {
-
-        if (!user) {
-
-          router.push("/auth");
-
-          return;
-        }
-
-        setFirebaseUser(user);
-
-        setAuthLoading(false);
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        router.push("/auth");
+        return;
       }
-    );
-
+      setFirebaseUser(user);
+      setAuthLoading(false);
+    });
     return () => unsub();
-
   }, [router]);
 
-  // ─────────────────────────────────────────────
-  // REDIRECT TO MODEL
-  // ─────────────────────────────────────────────
-  const openModel = () => {
+  // If we return from Hugging Face with a case_id, redirect to results
+  useEffect(() => {
+    if (!authLoading && caseId) {
+      router.push(`/results?case_id=${caseId}`);
+    }
+  }, [authLoading, caseId, router]);
 
-    window.location.href =
-      "https://huggingface.co/spaces/inchara07/medora-model";
+  // Open the Hugging Face model in a new tab
+  const openModel = () => {
+    window.open(
+      "https://huggingface.co/spaces/inchara07/medora-model",
+      "_blank"
+    );
   };
 
-  // ─────────────────────────────────────────────
-  // LOADING
-  // ─────────────────────────────────────────────
   if (authLoading) {
-
     return (
       <div className="min-h-screen flex items-center justify-center">
-
-        <p className="text-[var(--primary-dark)] font-semibold">
-          Loading...
-        </p>
-
+        <p className="text-[var(--primary-dark)] font-semibold">Loading...</p>
       </div>
     );
   }
 
-  // ─────────────────────────────────────────────
-  // UI
-  // ─────────────────────────────────────────────
   return (
-
     <main className="min-h-screen flex items-center justify-center p-6">
-
       <div className="max-w-md w-full bg-white rounded-[28px] shadow-[var(--shadow-card)] p-8 flex flex-col gap-6 text-center">
-
         <div>
-
           <h1 className="text-2xl font-bold text-[var(--primary-dark)]">
-
             MEDORA AI
-
           </h1>
-
           <p className="text-sm text-[var(--text-soft)] mt-2">
-
-            Open the pediatric wrist fracture
-            detection model.
-
+            Launch the pediatric wrist fracture detection model.
           </p>
-
         </div>
 
         <button
           onClick={openModel}
-          className="
-            rounded-xl
-            bg-[var(--primary-dark)]
-            text-white
-            font-semibold
-            py-3
-            text-sm
-            hover:bg-[var(--primary)]
-            transition-colors
-          "
+          className="rounded-xl bg-[var(--primary-dark)] text-white font-semibold py-3 text-sm hover:bg-[var(--primary)] transition-colors"
         >
-
           Open MEDORA AI Model
-
         </button>
-
       </div>
-
     </main>
   );
 }
