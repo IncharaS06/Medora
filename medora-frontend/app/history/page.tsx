@@ -9,8 +9,7 @@ import {
     onSnapshot,
     orderBy,
     query,
-    Timestamp,
-    where,
+    DocumentData,
 } from "firebase/firestore";
 import {
     Search,
@@ -36,7 +35,6 @@ import {
     Cell,
 } from "recharts";
 
-// Type for boxes (compatible with existing UI)
 type BoxType = {
     x1: number;
     y1: number;
@@ -44,27 +42,22 @@ type BoxType = {
     y2: number;
 };
 
-// Updated CaseItem to include both original and transformed fields
 type CaseItem = {
     id: string;
-    userId?: string;
-    userEmail?: string;
-    patientName?: string;
-    prediction?: string;          // from final_result
-    confidence?: number;          // normalized 0-1 from fracture_probability
-    createdAt?: Timestamp | string | null;
-    originalImageBase64?: string;
-    annotatedImageBase64?: string;
-    gradCamBase64?: string;
-    riskLevel?: string;           // from risk_level
-    modelName?: string;
+    prediction: string;          // from final_result
+    confidence: number;           // 0-1 from fracture_probability
+    createdAt?: string | null;    // timestamp string
+    originalImageUrl?: string;
+    annotatedImageUrl?: string;
+    gradCamUrl?: string;
+    riskLevel?: string;
     summary?: string;
     recommendation?: string;
-    boxes?: BoxType[];            // converted from detections
-    // optional raw fields for debugging
-    fractureProbabilityRaw?: number;
-    detectionsRaw?: any[];
+    boxes: BoxType[];
     filename?: string;
+    fractureProbabilityRaw?: number;
+    normalProbability?: number;
+    yoloConfidence?: number;
 };
 
 export default function HistoryPage() {
@@ -77,6 +70,7 @@ export default function HistoryPage() {
     const [search, setSearch] = useState("");
     const [filter, setFilter] = useState<"all" | "fracture" | "normal">("all");
 
+    // Auth
     useEffect(() => {
         const unsubAuth = onAuthStateChanged(auth, (user) => {
             if (!user) {
@@ -85,29 +79,23 @@ export default function HistoryPage() {
             }
             setFirebaseUser(user);
         });
-
         return () => unsubAuth();
     }, [router]);
 
+    // Fetch all cases, ordered by timestamp descending
     useEffect(() => {
         if (!firebaseUser) return;
 
         setLoading(true);
-
-        const q = query(
-            collection(db, "cases"),
-            where("userId", "==", firebaseUser.uid),
-            orderBy("createdAt", "desc")
-        );
+        const q = query(collection(db, "cases"), orderBy("timestamp", "desc"));
 
         const unsubscribe = onSnapshot(
             q,
             (snapshot) => {
                 const fetchedCases: CaseItem[] = snapshot.docs.map((doc) => {
-                    const data = doc.data();
+                    const data = doc.data() as DocumentData;
 
-                    // ---- Map and transform fields ----
-                    // 1. prediction from final_result
+                    // Prediction from final_result
                     const rawResult = data.final_result || "Unknown";
                     const prediction =
                         rawResult.toLowerCase() === "fracture"
@@ -116,18 +104,20 @@ export default function HistoryPage() {
                             ? "Normal"
                             : "Unknown";
 
-                    // 2. confidence: fracture_probability (0-100) -> 0-1
+                    // Confidence: fracture_probability (0-100) -> 0-1
                     const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
-                    const confidenceNormalized = fractureProb / 100;
+                    const confidence = fractureProb / 100;
 
-                    // 3. parse createdAt: could be Firestore Timestamp or string "2026-05-12 05:53:16"
-                    let createdAt = data.createdAt || data.timestamp || null;
-                    if (typeof createdAt === "string") {
-                        const parsed = new Date(createdAt.replace(" ", "T"));
-                        createdAt = isNaN(parsed.getTime()) ? null : Timestamp.fromDate(parsed);
-                    }
+                    // Timestamp string (e.g., "2026-05-13 03:28:22")
+                    const createdAt = data.timestamp || null;
 
-                    // 4. convert detections array to boxes (x1,y1,x2,y2)
+                    // Image URLs from nested object
+                    const imageUrls = data.image_urls || {};
+                    const originalImageUrl = imageUrls.original_url || "";
+                    const annotatedImageUrl = imageUrls.yolo_annotated_url || "";
+                    const gradCamUrl = imageUrls.gradcam_overlay_url || "";
+
+                    // Convert detections to boxes (x1,y1,x2,y2)
                     let boxes: BoxType[] = [];
                     const detections = data.detections;
                     if (Array.isArray(detections)) {
@@ -145,28 +135,22 @@ export default function HistoryPage() {
                         });
                     }
 
-                    // 5. risk level
-                    const riskLevel = data.risk_level || data.riskLevel || "";
-
                     return {
                         id: doc.id,
-                        userId: data.userId || "",
-                        userEmail: data.userEmail || "",
-                        patientName: data.patientName || "Unknown",
-                        prediction: prediction,
-                        confidence: confidenceNormalized,
-                        createdAt: createdAt,
-                        originalImageBase64: data.originalImageBase64 || "",
-                        annotatedImageBase64: data.annotatedImageBase64 || "",
-                        gradCamBase64: data.gradCamBase64 || "",
-                        riskLevel: riskLevel,
-                        modelName: data.modelName || "EfficientNet-B3 + YOLOv8",
+                        prediction,
+                        confidence,
+                        createdAt,
+                        originalImageUrl,
+                        annotatedImageUrl,
+                        gradCamUrl,
+                        riskLevel: data.risk_level || "",
                         summary: data.summary || "",
                         recommendation: data.recommendation || "",
-                        boxes: boxes,
-                        fractureProbabilityRaw: fractureProb,
-                        detectionsRaw: detections,
+                        boxes,
                         filename: data.filename || "",
+                        fractureProbabilityRaw: fractureProb,
+                        normalProbability: typeof data.normal_probability === "number" ? data.normal_probability : 0,
+                        yoloConfidence: typeof data.yolo_confidence === "number" ? data.yolo_confidence : undefined,
                     };
                 });
 
@@ -184,62 +168,33 @@ export default function HistoryPage() {
         return () => unsubscribe();
     }, [firebaseUser]);
 
-    const formatDate = (value?: Timestamp | string | null) => {
+    const formatDate = (value?: string | null) => {
         if (!value) return "—";
-
-        if (typeof value === "string") {
-            const date = new Date(value.replace(" ", "T"));
-            if (isNaN(date.getTime())) return "—";
-            return date.toLocaleDateString();
-        }
-
-        if (typeof value === "object" && value && "toDate" in value) {
-            try {
-                return value.toDate().toLocaleDateString();
-            } catch {
-                return "—";
-            }
-        }
-
-        return "—";
+        const date = new Date(value.replace(" ", "T"));
+        return isNaN(date.getTime()) ? "—" : date.toLocaleDateString();
     };
 
     const filteredCases = useMemo(() => {
         return cases.filter((c) => {
-            const prediction = (c.prediction || "").toLowerCase();
-            const patient = (c.patientName || "").toLowerCase();
+            const prediction = c.prediction.toLowerCase();
+            const filename = (c.filename || "").toLowerCase();
             const id = c.id.toLowerCase();
             const q = search.toLowerCase().trim();
 
-            const matchesSearch =
-                !q || patient.includes(q) || id.includes(q) || prediction.includes(q);
-
-            const matchesFilter =
-                filter === "all" ? true : prediction === filter.toLowerCase();
-
+            const matchesSearch = !q || filename.includes(q) || id.includes(q) || prediction.includes(q);
+            const matchesFilter = filter === "all" ? true : prediction === filter.toLowerCase();
             return matchesSearch && matchesFilter;
         });
     }, [cases, search, filter]);
 
     const stats = useMemo(() => {
         const total = filteredCases.length;
-        const fractures = filteredCases.filter(
-            (c) => (c.prediction || "").toLowerCase() === "fracture"
-        ).length;
-        const normal = filteredCases.filter(
-            (c) => (c.prediction || "").toLowerCase() === "normal"
-        ).length;
-        const avgConfidence =
-            total > 0
-                ? (filteredCases.reduce((sum, c) => sum + (c.confidence || 0) * 100, 0) / total)
-                : 0;
-
-        return {
-            total,
-            fractures,
-            normal,
-            avgConfidence,
-        };
+        const fractures = filteredCases.filter((c) => c.prediction === "Fracture").length;
+        const normal = filteredCases.filter((c) => c.prediction === "Normal").length;
+        const avgConfidence = total > 0
+            ? filteredCases.reduce((sum, c) => sum + c.confidence * 100, 0) / total
+            : 0;
+        return { total, fractures, normal, avgConfidence };
     }, [filteredCases]);
 
     const distributionData = useMemo(
@@ -253,7 +208,7 @@ export default function HistoryPage() {
     const confidenceChartData = useMemo(() => {
         return filteredCases.slice(0, 6).map((item, index) => ({
             name: `Case ${index + 1}`,
-            confidence: Number(((item.confidence || 0) * 100).toFixed(1)),
+            confidence: Number((item.confidence * 100).toFixed(1)),
         }));
     }, [filteredCases]);
 
@@ -311,7 +266,7 @@ export default function HistoryPage() {
                     <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-soft)]" />
                     <input
                         type="text"
-                        placeholder="Search by case ID, patient, or result..."
+                        placeholder="Search by case ID, filename, or result..."
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         className="w-full rounded-2xl border border-[var(--border)] bg-white py-3 pl-11 pr-4 text-sm outline-none focus:border-[var(--primary)]"
@@ -354,30 +309,10 @@ export default function HistoryPage() {
             </div>
 
             <div className="max-w-7xl mx-auto mt-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
-                <HistoryStatCard
-                    title="Total Cases"
-                    value={stats.total}
-                    icon={<FolderOpen className="h-5 w-5" />}
-                    color="bg-[var(--secondary)]/35 text-[var(--primary-dark)]"
-                />
-                <HistoryStatCard
-                    title="Fractures"
-                    value={stats.fractures}
-                    icon={<AlertTriangle className="h-5 w-5" />}
-                    color="bg-red-50 text-red-600"
-                />
-                <HistoryStatCard
-                    title="Normal"
-                    value={stats.normal}
-                    icon={<CheckCircle2 className="h-5 w-5" />}
-                    color="bg-emerald-50 text-emerald-600"
-                />
-                <HistoryStatCard
-                    title="Avg Confidence"
-                    value={`${stats.avgConfidence.toFixed(1)}%`}
-                    icon={<BarChart3 className="h-5 w-5" />}
-                    color="bg-blue-50 text-blue-600"
-                />
+                <HistoryStatCard title="Total Cases" value={stats.total} icon={<FolderOpen className="h-5 w-5" />} color="bg-[var(--secondary)]/35 text-[var(--primary-dark)]" />
+                <HistoryStatCard title="Fractures" value={stats.fractures} icon={<AlertTriangle className="h-5 w-5" />} color="bg-red-50 text-red-600" />
+                <HistoryStatCard title="Normal" value={stats.normal} icon={<CheckCircle2 className="h-5 w-5" />} color="bg-emerald-50 text-emerald-600" />
+                <HistoryStatCard title="Avg Confidence" value={`${stats.avgConfidence.toFixed(1)}%`} icon={<BarChart3 className="h-5 w-5" />} color="bg-blue-50 text-blue-600" />
             </div>
 
             {filteredCases.length > 0 && (
@@ -385,11 +320,8 @@ export default function HistoryPage() {
                     <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)] xl:col-span-2">
                         <div className="mb-4 flex items-center gap-2">
                             <BarChart3 className="h-5 w-5 text-[var(--primary-dark)]" />
-                            <h3 className="text-lg font-bold text-[var(--foreground)]">
-                                Recent Case Confidence
-                            </h3>
+                            <h3 className="text-lg font-bold text-[var(--foreground)]">Recent Case Confidence</h3>
                         </div>
-
                         <div className="h-[260px] w-full">
                             <ResponsiveContainer width="100%" height="100%">
                                 <BarChart data={confidenceChartData}>
@@ -397,11 +329,7 @@ export default function HistoryPage() {
                                     <XAxis dataKey="name" />
                                     <YAxis domain={[0, 100]} />
                                     <Tooltip formatter={(value) => [`${value}%`, "Confidence"]} />
-                                    <Bar
-                                        dataKey="confidence"
-                                        fill="#7c6ee6"
-                                        radius={[8, 8, 0, 0]}
-                                    />
+                                    <Bar dataKey="confidence" fill="#7c6ee6" radius={[8, 8, 0, 0]} />
                                 </BarChart>
                             </ResponsiveContainer>
                         </div>
@@ -410,22 +338,12 @@ export default function HistoryPage() {
                     <div className="rounded-[28px] bg-white p-5 shadow-[var(--shadow-card)]">
                         <div className="mb-4 flex items-center gap-2">
                             <CalendarDays className="h-5 w-5 text-[var(--primary-dark)]" />
-                            <h3 className="text-lg font-bold text-[var(--foreground)]">
-                                Result Distribution
-                            </h3>
+                            <h3 className="text-lg font-bold text-[var(--foreground)]">Result Distribution</h3>
                         </div>
-
                         <div className="h-[240px] w-full">
                             <ResponsiveContainer width="100%" height="100%">
                                 <PieChart>
-                                    <Pie
-                                        data={distributionData}
-                                        dataKey="value"
-                                        nameKey="name"
-                                        innerRadius={50}
-                                        outerRadius={80}
-                                        paddingAngle={4}
-                                    >
+                                    <Pie data={distributionData} dataKey="value" nameKey="name" innerRadius={50} outerRadius={80} paddingAngle={4}>
                                         {distributionData.map((entry, index) => (
                                             <Cell key={index} fill={entry.color} />
                                         ))}
@@ -434,23 +352,14 @@ export default function HistoryPage() {
                                 </PieChart>
                             </ResponsiveContainer>
                         </div>
-
                         <div className="mt-3 space-y-2">
                             {distributionData.map((item) => (
-                                <div
-                                    key={item.name}
-                                    className="flex items-center justify-between rounded-xl bg-[var(--card)] px-3 py-2"
-                                >
+                                <div key={item.name} className="flex items-center justify-between rounded-xl bg-[var(--card)] px-3 py-2">
                                     <div className="flex items-center gap-2">
-                                        <span
-                                            className="h-3 w-3 rounded-full"
-                                            style={{ backgroundColor: item.color }}
-                                        />
+                                        <span className="h-3 w-3 rounded-full" style={{ backgroundColor: item.color }} />
                                         <span className="text-sm font-medium">{item.name}</span>
                                     </div>
-                                    <span className="text-sm text-[var(--text-soft)]">
-                                        {item.value}
-                                    </span>
+                                    <span className="text-sm text-[var(--text-soft)]">{item.value}</span>
                                 </div>
                             ))}
                         </div>
@@ -461,16 +370,9 @@ export default function HistoryPage() {
             {filteredCases.length === 0 && !error ? (
                 <div className="max-w-7xl mx-auto mt-10 bg-white rounded-[28px] shadow-[var(--shadow-card)] p-10 text-center">
                     <FileImage className="mx-auto h-10 w-10 text-[var(--primary-dark)]" />
-                    <h2 className="mt-4 text-2xl font-bold text-[var(--foreground)]">
-                        No cases found
-                    </h2>
-                    <p className="mt-3 text-[var(--text-soft)]">
-                        Upload a wrist radiograph to create your first analysis record.
-                    </p>
-                    <button
-                        onClick={() => router.push("/upload")}
-                        className="mt-6 px-5 py-3 rounded-xl bg-[var(--primary-dark)] text-white font-semibold hover:bg-[var(--primary)]"
-                    >
+                    <h2 className="mt-4 text-2xl font-bold text-[var(--foreground)]">No cases found</h2>
+                    <p className="mt-3 text-[var(--text-soft)]">Upload a wrist radiograph to create your first analysis record.</p>
+                    <button onClick={() => router.push("/upload")} className="mt-6 px-5 py-3 rounded-xl bg-[var(--primary-dark)] text-white font-semibold hover:bg-[var(--primary)]">
                         Upload First Scan
                     </button>
                 </div>
@@ -478,45 +380,29 @@ export default function HistoryPage() {
                 <>
                     <div className="max-w-7xl mx-auto mt-8 grid gap-4 md:hidden">
                         {filteredCases.map((c) => (
-                            <div
-                                key={c.id}
-                                className="bg-white rounded-2xl shadow-[var(--shadow-card)] p-4"
-                            >
+                            <div key={c.id} className="bg-white rounded-2xl shadow-[var(--shadow-card)] p-4">
                                 <div className="flex items-start justify-between gap-4">
                                     <div className="min-w-0">
                                         <p className="text-xs text-[var(--text-soft)]">Case ID</p>
-                                        <p className="truncate font-semibold text-[var(--foreground)]">
-                                            {c.id}
-                                        </p>
+                                        <p className="truncate font-semibold text-[var(--foreground)]">{c.id}</p>
                                     </div>
-
-                                    <span
-                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                                            (c.prediction || "").toLowerCase() === "fracture"
-                                                ? "bg-red-50 text-red-600"
-                                                : (c.prediction || "").toLowerCase() === "normal"
-                                                ? "bg-emerald-50 text-emerald-600"
-                                                : "bg-amber-50 text-amber-600"
-                                        }`}
-                                    >
-                                        {c.prediction || "Unknown"}
+                                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                        c.prediction === "Fracture"
+                                            ? "bg-red-50 text-red-600"
+                                            : c.prediction === "Normal"
+                                            ? "bg-emerald-50 text-emerald-600"
+                                            : "bg-amber-50 text-amber-600"
+                                    }`}>
+                                        {c.prediction}
                                     </span>
                                 </div>
-
                                 <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                                    <InfoMini label="Patient" value={c.patientName || "Unknown"} />
-                                    <InfoMini
-                                        label="Confidence"
-                                        value={`${((c.confidence || 0) * 100).toFixed(1)}%`}
-                                    />
+                                    <InfoMini label="Filename" value={c.filename || "Unknown"} />
+                                    <InfoMini label="Confidence" value={`${(c.confidence * 100).toFixed(1)}%`} />
                                     <InfoMini label="Date" value={formatDate(c.createdAt)} />
-                                    <InfoMini label="Regions" value={`${c.boxes?.length || 0}`} />
+                                    <InfoMini label="Regions" value={`${c.boxes.length}`} />
                                 </div>
-
-                                <button
-                                    onClick={() => handleViewCase(c)}
-                                    className="mt-4 w-full px-4 py-2.5 rounded-xl bg-[var(--primary-dark)] text-white text-sm font-semibold"
-                                >
+                                <button onClick={() => handleViewCase(c)} className="mt-4 w-full px-4 py-2.5 rounded-xl bg-[var(--primary-dark)] text-white text-sm font-semibold">
                                     View Case
                                 </button>
                             </div>
@@ -529,7 +415,7 @@ export default function HistoryPage() {
                                 <thead className="bg-[var(--secondary)]/45">
                                     <tr>
                                         <th className="text-left p-4 font-semibold">Case ID</th>
-                                        <th className="text-left p-4 font-semibold">Patient</th>
+                                        <th className="text-left p-4 font-semibold">Filename</th>
                                         <th className="text-left p-4 font-semibold">Result</th>
                                         <th className="text-left p-4 font-semibold">Confidence</th>
                                         <th className="text-left p-4 font-semibold">Date</th>
@@ -537,43 +423,27 @@ export default function HistoryPage() {
                                         <th className="text-left p-4 font-semibold">Action</th>
                                     </tr>
                                 </thead>
-
                                 <tbody>
                                     {filteredCases.map((c) => (
-                                        <tr
-                                            key={c.id}
-                                            className="border-t border-[var(--border)] hover:bg-[var(--card)]/35"
-                                        >
+                                        <tr key={c.id} className="border-t border-[var(--border)] hover:bg-[var(--card)]/35">
                                             <td className="p-4 font-medium">{c.id}</td>
-                                            <td className="p-4">{c.patientName || "Unknown"}</td>
-
+                                            <td className="p-4">{c.filename || "Unknown"}</td>
                                             <td className="p-4">
-                                                <span
-                                                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                                                        (c.prediction || "").toLowerCase() === "fracture"
-                                                            ? "bg-red-50 text-red-600"
-                                                            : (c.prediction || "").toLowerCase() === "normal"
-                                                            ? "bg-emerald-50 text-emerald-600"
-                                                            : "bg-amber-50 text-amber-600"
-                                                    }`}
-                                                >
-                                                    {c.prediction || "Unknown"}
+                                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                                    c.prediction === "Fracture"
+                                                        ? "bg-red-50 text-red-600"
+                                                        : c.prediction === "Normal"
+                                                        ? "bg-emerald-50 text-emerald-600"
+                                                        : "bg-amber-50 text-amber-600"
+                                                }`}>
+                                                    {c.prediction}
                                                 </span>
                                             </td>
-
-                                            <td className="p-4">
-                                                {((c.confidence || 0) * 100).toFixed(1)}%
-                                            </td>
-
+                                            <td className="p-4">{`${(c.confidence * 100).toFixed(1)}%`}</td>
                                             <td className="p-4">{formatDate(c.createdAt)}</td>
-
-                                            <td className="p-4">{c.boxes?.length || 0}</td>
-
+                                            <td className="p-4">{c.boxes.length}</td>
                                             <td className="p-4">
-                                                <button
-                                                    onClick={() => handleViewCase(c)}
-                                                    className="px-3 py-1.5 rounded-lg bg-[var(--primary-dark)] text-white text-sm font-medium"
-                                                >
+                                                <button onClick={() => handleViewCase(c)} className="px-3 py-1.5 rounded-lg bg-[var(--primary-dark)] text-white text-sm font-medium">
                                                     View
                                                 </button>
                                             </td>
@@ -591,40 +461,18 @@ export default function HistoryPage() {
 
 function getReadableFirestoreError(err: any) {
     const code = err?.code || "";
-
-    if (code.includes("permission-denied")) {
-        return "Permission denied while reading Firestore data. Check Firestore rules.";
-    }
-
-    if (code.includes("failed-precondition")) {
-        return "Firestore index or query requirement not satisfied. Create the required composite index for userId + createdAt.";
-    }
-
-    if (code.includes("unavailable")) {
-        return "Firestore is temporarily unavailable.";
-    }
-
+    if (code.includes("permission-denied")) return "Permission denied while reading Firestore data. Check Firestore rules.";
+    if (code.includes("failed-precondition")) return "Firestore index or query requirement not satisfied. Create the required composite index for timestamp.";
+    if (code.includes("unavailable")) return "Firestore is temporarily unavailable.";
     return "Unable to fetch case history.";
 }
 
-function HistoryStatCard({
-    title,
-    value,
-    icon,
-    color,
-}: {
-    title: string;
-    value: string | number;
-    icon: React.ReactNode;
-    color: string;
-}) {
+function HistoryStatCard({ title, value, icon, color }: { title: string; value: string | number; icon: React.ReactNode; color: string }) {
     return (
         <div className="rounded-[24px] bg-white p-4 shadow-[var(--shadow-card)] sm:p-5">
             <div className={`inline-flex rounded-2xl p-3 ${color}`}>{icon}</div>
             <p className="mt-4 text-sm text-[var(--text-soft)]">{title}</p>
-            <p className="mt-1 text-xl sm:text-2xl font-bold text-[var(--foreground)]">
-                {value}
-            </p>
+            <p className="mt-1 text-xl sm:text-2xl font-bold text-[var(--foreground)]">{value}</p>
         </div>
     );
 }
@@ -633,9 +481,7 @@ function InfoMini({ label, value }: { label: string; value: string }) {
     return (
         <div className="min-w-0">
             <p className="text-xs text-[var(--text-soft)]">{label}</p>
-            <p className="mt-1 truncate font-medium text-[var(--foreground)]">
-                {value}
-            </p>
+            <p className="mt-1 truncate font-medium text-[var(--foreground)]">{value}</p>
         </div>
     );
 }
