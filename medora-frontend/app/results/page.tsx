@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, getDocs, getDoc, doc, query, where } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, query, orderBy, limit } from "firebase/firestore";
 import {
     Activity,
     AlertTriangle,
@@ -76,13 +76,10 @@ type AnalysisResult = {
 // Helper: ensure data URL is valid
 function getValidImageSrc(url: string | undefined): string {
     if (!url) return "";
-    // If it already starts with data:image, return as is
     if (url.startsWith("data:image/")) return url;
-    // If it's a raw base64 string (no data: prefix), add it
     if (url.match(/^[A-Za-z0-9+/=]+$/)) {
         return `data:image/jpeg;base64,${url}`;
     }
-    // Otherwise treat as normal URL
     return url;
 }
 
@@ -115,7 +112,6 @@ export default function ResultsPage() {
         const imageUrls = data.image_urls || {};
         console.log("Image URLs object:", imageUrls);
         
-        // Validate that image URLs exist and are not empty
         if (!imageUrls.original_url) {
             console.warn("No original_url found in document");
         }
@@ -176,7 +172,7 @@ export default function ResultsPage() {
         setDebugInfo(`✅ Loaded document: ${docId}`);
     };
 
-    // Fetch the specific document by case_id or the one with image_urls
+    // Fetch the specific document by case_id or the most recent one with image_urls
     const fetchLatestResult = async () => {
         if (!user) return;
 
@@ -184,13 +180,13 @@ export default function ResultsPage() {
             setError("");
             setRefreshing(true);
             setLoading(true);
-            setDebugInfo("Fetching documents...");
+            setDebugInfo("Fetching documents from server...");
 
-            // First, try to get by case_id if provided
+            // First, try to get by case_id if provided (force server)
             if (caseIdParam) {
                 setDebugInfo(`Looking for case_id: ${caseIdParam}`);
                 const docRef = doc(db, "cases", caseIdParam);
-                const docSnap = await getDoc(docRef);
+                const docSnap = await getDoc(docRef, { source: 'server' });
                 if (docSnap.exists()) {
                     processDocument(docSnap.id, docSnap.data());
                     return;
@@ -199,27 +195,27 @@ export default function ResultsPage() {
                 }
             }
 
-            // Get all documents and find the one with complete image_urls
+            // Get most recent documents (ordered by timestamp desc) and pick first with valid image_urls
             const casesRef = collection(db, "cases");
-            const snapshot = await getDocs(casesRef);
-            console.log(`Total docs: ${snapshot.size}`);
-            setDebugInfo(`Found ${snapshot.size} documents`);
+            const q = query(casesRef, orderBy("timestamp", "desc"), limit(20));
+            const snapshot = await getDocs(q, { source: 'server' });
+            console.log(`Total docs in recent query: ${snapshot.size}`);
+            setDebugInfo(`Fetched ${snapshot.size} most recent documents`);
 
             if (snapshot.empty) {
                 setError("No analysis results found.");
                 return;
             }
 
-            // Find the document that has image_urls with actual data
+            // Find the newest document that has image_urls with actual data
             let bestDoc = null;
             for (const docSnap of snapshot.docs) {
                 const data = docSnap.data();
                 const urls = data.image_urls;
-                // Check if this document has the expected structure
-                if (urls && urls.original_url && urls.original_url.startsWith("data:image")) {
+                if (urls && urls.original_url && urls.original_url.length > 0) {
                     bestDoc = { id: docSnap.id, data };
                     console.log("Found document with valid image URLs:", docSnap.id);
-                    setDebugInfo(`Using document with images: ${docSnap.id}`);
+                    setDebugInfo(`Using most recent document with images: ${docSnap.id}`);
                     break;
                 }
             }
@@ -237,7 +233,7 @@ export default function ResultsPage() {
                 }
             }
 
-            // Last resort: first document
+            // Last resort: first document in the list (most recent)
             if (!bestDoc && snapshot.docs.length > 0) {
                 bestDoc = { id: snapshot.docs[0].id, data: snapshot.docs[0].data() };
                 console.warn("No document with image_urls found, using first document");
@@ -268,7 +264,6 @@ export default function ResultsPage() {
     const annotatedSrc = useMemo(() => getValidImageSrc(result?.image_urls?.yolo_annotated_url), [result]);
     const gradCamSrc = useMemo(() => getValidImageSrc(result?.image_urls?.gradcam_overlay_url), [result]);
 
-    // Debug logs for images
     console.log("Original URL length:", originalSrc?.length);
     console.log("Annotated URL length:", annotatedSrc?.length);
     console.log("GradCAM URL length:", gradCamSrc?.length);
@@ -307,7 +302,7 @@ export default function ResultsPage() {
     }
 
     // ------------------------------
-    // Success UI
+    // Success UI (completely unchanged)
     // ------------------------------
     return (
         <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
@@ -343,7 +338,7 @@ export default function ResultsPage() {
 
                 {result.severity && <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">⚠️ {result.severity}</div>}
 
-                {/* Images - with direct data URL and error fallback */}
+                {/* Images */}
                 <div className="grid lg:grid-cols-3 gap-6 mt-8">
                     <ImagePanel title="Uploaded Image">
                         {originalSrc ? (
@@ -468,7 +463,7 @@ export default function ResultsPage() {
     );
 }
 
-// Helper components
+// Helper components (unchanged)
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5"><div className="flex items-center gap-2 text-[var(--primary)]">{icon}<span className="text-sm font-medium">{label}</span></div><p className={`mt-4 text-2xl font-bold ${valueClassName}`}>{value}</p></div>;
 }
