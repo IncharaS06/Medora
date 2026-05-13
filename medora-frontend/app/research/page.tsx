@@ -6,8 +6,9 @@ import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
     collection,
-    getDocs,
+    onSnapshot,
     query,
+    orderBy,
     DocumentData,
 } from "firebase/firestore";
 import {
@@ -57,6 +58,7 @@ type CaseItem = {
     summary: string;
     recommendation: string;
     timestamp: string;
+    filename: string;
     groundTruth?: string;
 };
 
@@ -223,19 +225,18 @@ export default function ResearchPage() {
         return () => unsub();
     }, [router]);
 
+    // Real-time listener for all cases
     useEffect(() => {
-        const fetchCases = async () => {
-            try {
-                if (!firebaseUser) return;
+        if (!firebaseUser) return;
 
-                // Query all cases, ordered by timestamp descending
-                const q = query(collection(db, "cases"));
-                const snap = await getDocs(q);
+        const q = query(collection(db, "cases"), orderBy("timestamp", "desc"));
 
-                const items: CaseItem[] = snap.docs.map((doc) => {
+        const unsubscribe = onSnapshot(
+            q,
+            (snapshot) => {
+                const items: CaseItem[] = snapshot.docs.map((doc) => {
                     const data = doc.data() as DocumentData;
 
-                    // Prediction from final_result
                     const rawResult = data.final_result || "Unknown";
                     const prediction =
                         rawResult.toLowerCase() === "fracture"
@@ -244,20 +245,16 @@ export default function ResearchPage() {
                             ? "Normal"
                             : "Unknown";
 
-                    // Confidence from fracture_probability (0-100) -> 0-1
                     const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
                     const confidence = fractureProb / 100;
 
-                    // Timestamp string
                     const timestamp = data.timestamp || "";
 
-                    // Image URLs from nested object
                     const imageUrls = data.image_urls || {};
                     const originalImageUrl = imageUrls.original_url || "";
                     const annotatedImageUrl = imageUrls.yolo_annotated_url || "";
                     const gradCamUrl = imageUrls.gradcam_overlay_url || "";
 
-                    // Convert detections to boxes
                     let boxes: RawBoxType[] = [];
                     const detections = data.detections;
                     if (Array.isArray(detections)) {
@@ -269,12 +266,10 @@ export default function ResearchPage() {
                         }));
                     }
 
-                    // Risk level, summary, recommendation
                     const riskLevel = data.risk_level || "";
                     const summary = data.summary || "";
                     const recommendation = data.recommendation || "";
-
-                    // Ground truth (if you add this field later)
+                    const filename = data.filename || "";
                     const groundTruth = data.groundTruth || data.actualLabel || data.trueLabel || null;
 
                     return {
@@ -290,22 +285,23 @@ export default function ResearchPage() {
                         summary,
                         recommendation,
                         timestamp,
+                        filename,
                         groundTruth,
                     };
                 });
 
-                // Sort by timestamp descending
-                items.sort((a, b) => parseTimestamp(b.timestamp) - parseTimestamp(a.timestamp));
                 setCases(items);
                 setError("");
-            } catch (err) {
-                console.error(err);
+                setLoading(false);
+            },
+            (err) => {
+                console.error("Firestore error:", err);
                 setError("Failed to load research data from Firestore.");
-            } finally {
                 setLoading(false);
             }
-        };
-        fetchCases();
+        );
+
+        return () => unsubscribe();
     }, [firebaseUser]);
 
     const latestCase = useMemo(() => (cases.length ? cases[0] : null), [cases]);
@@ -533,6 +529,7 @@ export default function ResearchPage() {
                     <p className="mt-2 text-sm text-[var(--text-soft)]">Real latest-case details from your Firestore data.</p>
                     <div className="mt-5 space-y-4">
                         <DetailRow label="Case ID" value={latestCase?.id || "Not available"} />
+                        <DetailRow label="Filename" value={latestCase?.filename || "Not available"} />
                         <DetailRow label="Prediction" value={latestCase?.prediction || "Not available"} />
                         <DetailRow label="Confidence" value={`${(latestConfidence * 100).toFixed(1)}%`} />
                         <DetailRow label="Risk Level" value={latestRisk} />
