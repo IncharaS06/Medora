@@ -1,412 +1,603 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, getDocs, query, orderBy, limit, doc, getDoc } from "firebase/firestore";
 import {
-  Activity,
-  AlertTriangle,
-  Brain,
-  CalendarDays,
-  FileBarChart2,
-  ScanLine,
-  ShieldAlert,
-  Layers,
-  RefreshCw,
-  ChevronRight,
+    collection,
+    onSnapshot,
+    query,
+    orderBy,
+    DocumentData,
+} from "firebase/firestore";
+import {
+    ArrowLeft,
+    Activity,
+    Brain,
+    FileBarChart2,
+    ShieldCheck,
+    ScanLine,
+    Target,
+    TrendingUp,
+    Microscope,
+    AlertTriangle,
+    FlaskConical,
 } from "lucide-react";
+import {
+    ResponsiveContainer,
+    CartesianGrid,
+    Tooltip,
+    XAxis,
+    YAxis,
+    LineChart,
+    Line,
+    BarChart,
+    Bar,
+} from "recharts";
 
-// --- Types matching EXACT Firestore document ---
-type Detection = {
-  bbox: number[];
-  center_x: number;
-  center_y: number;
-  confidence: number;
-  height_px: number;
-  width_px: number;
-  label: string;
+type RawBoxType =
+    | {
+          x1?: number;
+          y1?: number;
+          x2?: number;
+          y2?: number;
+      }
+    | number[];
+
+type CaseItem = {
+    id: string;
+    prediction: string;
+    confidence: number;
+    boxes: RawBoxType[];
+    originalImageUrl: string;
+    annotatedImageUrl: string;
+    gradCamUrl: string;
+    riskLevel: string;
+    modelName: string;
+    summary: string;
+    recommendation: string;
+    timestamp: string;
+    filename: string;
+    groundTruth?: string;
 };
 
-type StageEfficientNet = {
-  confidence_level: string;
-  fracture_probability: number;
-  normal_probability: number;
+type BoxType = {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
 };
 
-type StageYOLO = {
-  detections: Detection[];
-  detections_count: number;
-  max_confidence: number;
-  ran: boolean;
-};
-
-type ImageUrls = {
-  original_url: string;
-  yolo_annotated_url: string;
-  gradcam_overlay_url: string;
-  heatmap_url: string;
-};
-
-type AnalysisResult = {
-  id: string;
-  aspect_ratio: string;
-  case_id: string;
-  detections: Detection[];
-  detections_count: number;
-  file_size_kb: number;
-  filename: string;
-  final_result: string;
-  fracture_probability: number;
-  image_height: number;
-  image_urls: ImageUrls;
-  image_width: number;
-  is_fracture: boolean;
-  normal_probability: number;
-  recommendation: string;
-  risk_level: string;
-  severity: string;
-  stage1_efficientnet: StageEfficientNet;
-  stage2_yolo: StageYOLO;
-  summary: string;
-  timestamp: string;
-  yolo_confidence: number;
-};
-
-// Helper: images are already full data URLs, just return them
 function getImageSrc(url: string | undefined): string {
-  return url || "";
-}
-
-export default function ResultsPage() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const caseIdParam = searchParams.get("case_id");
-
-  const [user, setUser] = useState<User | null>(null);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [refreshing, setRefreshing] = useState(false);
-  const [debugInfo, setDebugInfo] = useState("");
-
-  // Auth
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      if (!firebaseUser) router.push("/auth");
-      else setUser(firebaseUser);
-    });
-    return () => unsubscribe();
-  }, [router]);
-
-  // Fetch the most recent case (or by case_id)
-  const fetchLatestResult = async () => {
-    if (!user) return;
-
-    try {
-      setError("");
-      setRefreshing(true);
-      setLoading(true);
-      setDebugInfo("Fetching...");
-
-      let docSnap = null;
-
-      if (caseIdParam) {
-        // If case_id provided, fetch that exact document
-        const docRef = doc(db, "cases", caseIdParam);
-        const snap = await getDoc(docRef);
-        if (snap.exists()) docSnap = snap;
-        else setDebugInfo(`Case ${caseIdParam} not found, trying latest`);
-      }
-
-      if (!docSnap) {
-        // Get most recent by timestamp
-        const q = query(collection(db, "cases"), orderBy("timestamp", "desc"), limit(1));
-        const snapshot = await getDocs(q);
-        if (!snapshot.empty) docSnap = snapshot.docs[0];
-      }
-
-      if (!docSnap) {
-        setError("No analysis found. Please upload a scan.");
-        return;
-      }
-
-      const data = docSnap.data();
-      setDebugInfo(`Loaded: ${docSnap.id}`);
-
-      const imageUrls = data.image_urls || {};
-      const stage1 = data.stage1_efficientnet || {};
-      const stage2 = data.stage2_yolo || {};
-
-      let detections: Detection[] = [];
-      if (Array.isArray(data.detections)) detections = data.detections;
-      else if (stage2.detections && Array.isArray(stage2.detections)) detections = stage2.detections;
-
-      const resultData: AnalysisResult = {
-        id: docSnap.id,
-        aspect_ratio: data.aspect_ratio || "",
-        case_id: data.case_id || "",
-        detections,
-        detections_count: data.detections_count ?? stage2.detections_count ?? detections.length,
-        file_size_kb: data.file_size_kb || 0,
-        filename: data.filename || "",
-        final_result: data.final_result || "Unknown",
-        fracture_probability: data.fracture_probability ?? stage1.fracture_probability ?? 0,
-        image_height: data.image_height || 0,
-        image_urls: {
-          original_url: imageUrls.original_url || "",
-          yolo_annotated_url: imageUrls.yolo_annotated_url || "",
-          gradcam_overlay_url: imageUrls.gradcam_overlay_url || "",
-          heatmap_url: imageUrls.heatmap_url || "",
-        },
-        image_width: data.image_width || 0,
-        is_fracture: Boolean(data.is_fracture),
-        normal_probability: data.normal_probability ?? stage1.normal_probability ?? 0,
-        recommendation: data.recommendation || "",
-        risk_level: data.risk_level || "Unknown",
-        severity: data.severity || "",
-        stage1_efficientnet: {
-          confidence_level: stage1.confidence_level || "N/A",
-          fracture_probability: stage1.fracture_probability ?? 0,
-          normal_probability: stage1.normal_probability ?? 0,
-        },
-        stage2_yolo: {
-          detections: stage2.detections || [],
-          detections_count: stage2.detections_count ?? 0,
-          max_confidence: stage2.max_confidence ?? 0,
-          ran: stage2.ran ?? false,
-        },
-        summary: data.summary || "",
-        timestamp: data.timestamp || "",
-        yolo_confidence: data.yolo_confidence ?? stage2.max_confidence ?? 0,
-      };
-      setResult(resultData);
-    } catch (err: any) {
-      console.error(err);
-      setError(`Error: ${err.message}`);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+    if (!url) return "";
+    if (url.startsWith("data:image/")) return url;
+    if (typeof url === "string" && /^[A-Za-z0-9+/=]+$/.test(url)) {
+        return `data:image/jpeg;base64,${url}`;
     }
-  };
+    return url;
+}
 
-  useEffect(() => {
-    if (user) fetchLatestResult();
-  }, [user, caseIdParam]);
+function normalizeBoxes(boxes?: RawBoxType[]): BoxType[] {
+    if (!Array.isArray(boxes)) return [];
+    return boxes
+        .map((box) => {
+            if (Array.isArray(box)) {
+                return {
+                    x1: Number(box[0] ?? 0),
+                    y1: Number(box[1] ?? 0),
+                    x2: Number(box[2] ?? 0),
+                    y2: Number(box[3] ?? 0),
+                };
+            }
+            return {
+                x1: Number(box?.x1 ?? 0),
+                y1: Number(box?.y1 ?? 0),
+                x2: Number(box?.x2 ?? 0),
+                y2: Number(box?.y2 ?? 0),
+            };
+        })
+        .filter(
+            (b) =>
+                Number.isFinite(b.x1) &&
+                Number.isFinite(b.y1) &&
+                Number.isFinite(b.x2) &&
+                Number.isFinite(b.y2)
+        );
+}
 
-  const originalSrc = useMemo(() => getImageSrc(result?.image_urls?.original_url), [result]);
-  const annotatedSrc = useMemo(() => getImageSrc(result?.image_urls?.yolo_annotated_url), [result]);
-  const gradCamSrc = useMemo(() => getImageSrc(result?.image_urls?.gradcam_overlay_url), [result]);
+function parseTimestamp(timestamp?: string): number {
+    if (!timestamp) return 0;
+    const date = new Date(timestamp.replace(" ", "T"));
+    return isNaN(date.getTime()) ? 0 : date.getTime();
+}
 
-  const handleRefresh = () => fetchLatestResult();
+function normalizeBinaryLabel(value?: string): number | null {
+    const v = (value || "").trim().toLowerCase();
+    if (v === "fracture" || v === "positive" || v === "1") return 1;
+    if (v === "normal" || v === "negative" || v === "0") return 0;
+    return null;
+}
 
-  if (loading) {
-    return (
-      <main className="min-h-screen bg-[var(--background)] flex items-center justify-center">
-        <div className="bg-white rounded-3xl px-8 py-6 shadow-lg text-center">
-          <p className="font-semibold text-lg text-[var(--primary-dark)]">Loading results...</p>
-          <div className="mt-4 h-2 w-56 rounded-full bg-gray-200 overflow-hidden">
-            <div className="h-full bg-[var(--primary)] animate-progress-loading rounded-full" />
-          </div>
-          {debugInfo && <p className="mt-4 text-xs text-gray-400">{debugInfo}</p>}
-        </div>
-      </main>
+function getGroundTruth(item: CaseItem): number | null {
+    return normalizeBinaryLabel(item.groundTruth);
+}
+
+function computeBinaryMetrics(cases: CaseItem[]) {
+    const evaluated = cases
+        .map((item) => {
+            const gt = getGroundTruth(item);
+            const score = item.confidence;
+            const predLabel = normalizeBinaryLabel(item.prediction);
+            return {
+                gt,
+                score,
+                predLabel: predLabel !== null ? predLabel : score >= 0.5 ? 1 : 0,
+            };
+        })
+        .filter((x) => x.gt !== null);
+
+    let tp = 0,
+        tn = 0,
+        fp = 0,
+        fn = 0;
+    for (const row of evaluated) {
+        if (row.gt === 1 && row.predLabel === 1) tp++;
+        else if (row.gt === 0 && row.predLabel === 0) tn++;
+        else if (row.gt === 0 && row.predLabel === 1) fp++;
+        else if (row.gt === 1 && row.predLabel === 0) fn++;
+    }
+    const total = tp + tn + fp + fn;
+    const accuracy = total ? (tp + tn) / total : 0;
+    const precision = tp + fp ? tp / (tp + fp) : 0;
+    const recall = tp + fn ? tp / (tp + fn) : 0;
+    const specificity = tn + fp ? tn / (tn + fp) : 0;
+    const f1 = precision + recall ? (2 * precision * recall) / (precision + recall) : 0;
+    return {
+        evaluatedCount: total,
+        tp,
+        tn,
+        fp,
+        fn,
+        accuracy,
+        precision,
+        recall,
+        specificity,
+        f1,
+    };
+}
+
+function computeRocCurve(rows: { gt: number | null; score: number }[]) {
+    const valid = rows.filter((r) => r.gt !== null) as { gt: number; score: number }[];
+    const thresholds = Array.from({ length: 101 }, (_, i) => i / 100);
+    return thresholds.map((threshold) => {
+        let tp = 0,
+            tn = 0,
+            fp = 0,
+            fn = 0;
+        for (const row of valid) {
+            const pred = row.score >= threshold ? 1 : 0;
+            if (row.gt === 1 && pred === 1) tp++;
+            else if (row.gt === 0 && pred === 0) tn++;
+            else if (row.gt === 0 && pred === 1) fp++;
+            else if (row.gt === 1 && pred === 0) fn++;
+        }
+        const tpr = tp + fn ? tp / (tp + fn) : 0;
+        const fpr = fp + tn ? fp / (fp + tn) : 0;
+        return { threshold: Number(threshold.toFixed(2)), tpr, fpr };
+    });
+}
+
+function computePrCurve(rows: { gt: number | null; score: number }[]) {
+    const valid = rows.filter((r) => r.gt !== null) as { gt: number; score: number }[];
+    const thresholds = Array.from({ length: 101 }, (_, i) => i / 100);
+    return thresholds.map((threshold) => {
+        let tp = 0,
+            fp = 0,
+            fn = 0;
+        for (const row of valid) {
+            const pred = row.score >= threshold ? 1 : 0;
+            if (row.gt === 1 && pred === 1) tp++;
+            else if (row.gt === 0 && pred === 1) fp++;
+            else if (row.gt === 1 && pred === 0) fn++;
+        }
+        const precision = tp + fp ? tp / (tp + fp) : 1;
+        const recall = tp + fn ? tp / (tp + fn) : 0;
+        return { threshold: Number(threshold.toFixed(2)), precision, recall };
+    });
+}
+
+export default function ResearchPage() {
+    const router = useRouter();
+    const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+    const [cases, setCases] = useState<CaseItem[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState("");
+
+    useEffect(() => {
+        const unsub = onAuthStateChanged(auth, (user) => {
+            if (!user) {
+                router.push("/auth");
+                return;
+            }
+            setFirebaseUser(user);
+        });
+        return () => unsub();
+    }, [router]);
+
+    // Real-time listener for all cases
+    useEffect(() => {
+        if (!firebaseUser) return;
+
+        const q = query(collection(db, "cases"), orderBy("timestamp", "desc"));
+
+        const unsubscribe = onSnapshot(
+            q,
+            (snapshot) => {
+                const items: CaseItem[] = snapshot.docs.map((doc) => {
+                    const data = doc.data() as DocumentData;
+
+                    const rawResult = data.final_result || "Unknown";
+                    const prediction =
+                        rawResult.toLowerCase() === "fracture"
+                            ? "Fracture"
+                            : rawResult.toLowerCase() === "normal"
+                            ? "Normal"
+                            : "Unknown";
+
+                    const fractureProb = typeof data.fracture_probability === "number" ? data.fracture_probability : 0;
+                    const confidence = fractureProb / 100;
+
+                    const timestamp = data.timestamp || "";
+
+                    const imageUrls = data.image_urls || {};
+                    const originalImageUrl = imageUrls.original_url || "";
+                    const annotatedImageUrl = imageUrls.yolo_annotated_url || "";
+                    const gradCamUrl = imageUrls.gradcam_overlay_url || "";
+
+                    let boxes: RawBoxType[] = [];
+                    const detections = data.detections;
+                    if (Array.isArray(detections)) {
+                        boxes = detections.map((det: any) => ({
+                            x1: det.center_x - det.width_px / 2,
+                            y1: det.center_y - det.height_px / 2,
+                            x2: det.center_x + det.width_px / 2,
+                            y2: det.center_y + det.height_px / 2,
+                        }));
+                    }
+
+                    const riskLevel = data.risk_level || "";
+                    const summary = data.summary || "";
+                    const recommendation = data.recommendation || "";
+                    const filename = data.filename || "";
+                    const groundTruth = data.groundTruth || data.actualLabel || data.trueLabel || null;
+
+                    return {
+                        id: doc.id,
+                        prediction,
+                        confidence,
+                        boxes,
+                        originalImageUrl,
+                        annotatedImageUrl,
+                        gradCamUrl,
+                        riskLevel,
+                        modelName: "EfficientNet-B3 + YOLOv8",
+                        summary,
+                        recommendation,
+                        timestamp,
+                        filename,
+                        groundTruth,
+                    };
+                });
+
+                setCases(items);
+                setError("");
+                setLoading(false);
+            },
+            (err) => {
+                console.error("Firestore error:", err);
+                setError("Failed to load research data from Firestore.");
+                setLoading(false);
+            }
+        );
+
+        return () => unsubscribe();
+    }, [firebaseUser]);
+
+    const latestCase = useMemo(() => (cases.length ? cases[0] : null), [cases]);
+    const safeBoxes = useMemo(() => normalizeBoxes(latestCase?.boxes), [latestCase]);
+    const annotatedSrc = useMemo(() => getImageSrc(latestCase?.annotatedImageUrl), [latestCase]);
+    const gradCamSrc = useMemo(() => getImageSrc(latestCase?.gradCamUrl), [latestCase]);
+    const binaryMetrics = useMemo(() => computeBinaryMetrics(cases), [cases]);
+    const rocData = useMemo(
+        () =>
+            computeRocCurve(
+                cases.map((c) => ({
+                    gt: getGroundTruth(c),
+                    score: c.confidence,
+                }))
+            ),
+        [cases]
     );
-  }
-
-  if (error || !result) {
-    return (
-      <main className="min-h-screen bg-[var(--background)] flex items-center justify-center px-4">
-        <div className="bg-white rounded-3xl p-8 shadow-lg text-center max-w-md">
-          <p className="text-red-600 font-semibold mb-2">{error || "Result not available"}</p>
-          <p className="text-xs text-gray-500 mb-4">Debug: {debugInfo}</p>
-          <button onClick={() => router.push("/upload")} className="px-5 py-2 rounded-xl bg-[var(--primary-dark)] text-white font-semibold">
-            Go to Upload
-          </button>
-          <button onClick={handleRefresh} className="ml-3 px-5 py-2 rounded-xl border border-gray-300 bg-white font-semibold">
-            Retry
-          </button>
-        </div>
-      </main>
+    const prData = useMemo(
+        () =>
+            computePrCurve(
+                cases.map((c) => ({
+                    gt: getGroundTruth(c),
+                    score: c.confidence,
+                }))
+            ),
+        [cases]
     );
-  }
+    const confusionData = useMemo(
+        () => [
+            { name: "TP", value: binaryMetrics.tp },
+            { name: "FP", value: binaryMetrics.fp },
+            { name: "TN", value: binaryMetrics.tn },
+            { name: "FN", value: binaryMetrics.fn },
+        ],
+        [binaryMetrics]
+    );
+    const confidenceHistogram = useMemo(() => {
+        const bins = [
+            { range: "0.0-0.2", count: 0 },
+            { range: "0.2-0.4", count: 0 },
+            { range: "0.4-0.6", count: 0 },
+            { range: "0.6-0.8", count: 0 },
+            { range: "0.8-1.0", count: 0 },
+        ];
+        for (const item of cases) {
+            const c = item.confidence;
+            if (c < 0.2) bins[0].count++;
+            else if (c < 0.4) bins[1].count++;
+            else if (c < 0.6) bins[2].count++;
+            else if (c < 0.8) bins[3].count++;
+            else bins[4].count++;
+        }
+        return bins;
+    }, [cases]);
 
-  // ------------------------------
-  // UI (same as before, but images now work)
-  // ------------------------------
-  return (
-    <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
-      <div className="max-w-7xl mx-auto flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <img src="/logo.png" alt="MEDORA" className="w-10 h-10" />
-          <h1 className="text-2xl font-bold text-[var(--primary-dark)]">MEDORA Results</h1>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={handleRefresh} disabled={refreshing} className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 font-semibold flex items-center gap-2">
-            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} /> Refresh
-          </button>
-          <button onClick={() => router.push("/dashboard")} className="px-4 py-2 rounded-xl bg-[var(--primary-dark)] text-white font-semibold">
-            Dashboard
-          </button>
-        </div>
-      </div>
+    const latestConfidence = latestCase?.confidence ?? 0;
+    const latestRisk =
+        latestCase?.riskLevel ||
+        (latestConfidence >= 0.8
+            ? "High"
+            : latestConfidence >= 0.5
+            ? "Moderate"
+            : "Low");
 
-      <div className="max-w-7xl mx-auto mt-8 bg-white rounded-[30px] p-6 sm:p-8 shadow-[var(--shadow-card)]">
-        <div>
-          <h2 className="text-3xl font-bold text-[var(--foreground)]">Pediatric Wrist Fracture Analysis</h2>
-          <p className="mt-2 text-[var(--text-soft)]">AI-assisted fracture detection with two‑stage pipeline (EfficientNet‑B3 + YOLOv8).</p>
-          {debugInfo && <p className="mt-2 text-xs text-gray-400">{debugInfo}</p>}
-        </div>
+    const hasGroundTruth = binaryMetrics.evaluatedCount > 0;
 
-        {/* Summary Cards */}
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-8">
-          <SummaryCard icon={<Activity className="w-5 h-5" />} label="Final Result" value={result.final_result} valueClassName={result.is_fracture ? "text-red-600" : "text-green-600"} />
-          <SummaryCard icon={<FileBarChart2 className="w-5 h-5" />} label="Fracture Probability" value={`${result.fracture_probability.toFixed(1)}%`} />
-          <SummaryCard icon={<AlertTriangle className="w-5 h-5" />} label="Risk Level" value={result.risk_level} valueClassName={result.risk_level === "High" ? "text-red-600" : result.risk_level === "Moderate" ? "text-amber-600" : "text-emerald-600"} />
-          <SummaryCard icon={<ScanLine className="w-5 h-5" />} label="Detections" value={`${result.detections_count}`} />
-        </div>
-
-        {result.severity && <div className="mt-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800 text-sm">⚠️ {result.severity}</div>}
-
-        {/* Images - directly using the data URLs */}
-        <div className="grid lg:grid-cols-3 gap-6 mt-8">
-          <ImagePanel title="Uploaded Image">
-            {originalSrc ? (
-              <img src={originalSrc} alt="Original" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={() => console.error("Original image failed")} />
-            ) : (
-              <EmptyImageMessage text="Original image not available" />
-            )}
-          </ImagePanel>
-          <ImagePanel title="YOLO Annotated Image">
-            {annotatedSrc ? (
-              <img src={annotatedSrc} alt="Annotated" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={() => console.error("YOLO image failed")} />
-            ) : (
-              <EmptyImageMessage text="Annotated image not available" />
-            )}
-          </ImagePanel>
-          <ImagePanel title="Grad‑CAM Heatmap">
-            {gradCamSrc ? (
-              <img src={gradCamSrc} alt="GradCAM" className="rounded-2xl shadow w-full object-contain max-h-[420px]" onError={() => console.error("GradCAM image failed")} />
-            ) : (
-              <EmptyImageMessage text="Grad‑CAM heatmap not available" />
-            )}
-          </ImagePanel>
-        </div>
-
-        {/* AI Interpretation + Technical Details */}
-        <div className="grid lg:grid-cols-2 gap-6 mt-8">
-          <div className="rounded-3xl bg-[var(--card)] p-6">
-            <div className="flex items-center gap-2"><Brain className="w-5 h-5 text-[var(--primary)]" /><h3 className="text-xl font-bold">AI Interpretation</h3></div>
-            <p className="mt-5 text-sm leading-7 text-[var(--foreground)]">{result.summary}</p>
-            <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
-              <p className="font-semibold">Recommendation</p>
-              <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">{result.recommendation}</p>
-            </div>
-          </div>
-          <div className="rounded-3xl bg-[var(--card)] p-6">
-            <div className="flex items-center gap-2"><CalendarDays className="w-5 h-5 text-[var(--primary)]" /><h3 className="text-xl font-bold">Technical Details</h3></div>
-            <div className="mt-5 space-y-4">
-              <DetailRow label="Case ID" value={result.case_id} />
-              <DetailRow label="Filename" value={result.filename} />
-              <DetailRow label="Timestamp" value={result.timestamp} />
-              <DetailRow label="Aspect Ratio" value={result.aspect_ratio} />
-              <DetailRow label="Image Size" value={`${result.image_width} × ${result.image_height}`} />
-              <DetailRow label="File Size" value={`${result.file_size_kb} KB`} />
-              <DetailRow label="Normal Probability" value={`${result.normal_probability.toFixed(2)}%`} />
-              <DetailRow label="YOLO Max Confidence" value={`${result.yolo_confidence.toFixed(2)}%`} />
-            </div>
-            <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
-              <div className="flex items-center gap-2"><Layers className="w-4 h-4 text-[var(--primary)]" /><p className="font-semibold text-sm">Two‑Stage Pipeline</p></div>
-              <div className="mt-3 text-sm text-[var(--text-soft)] space-y-1">
-                <p>📊 EfficientNet‑B3: {result.stage1_efficientnet.confidence_level} confidence</p>
-                <p>🎯 YOLOv8: {result.detections_count} region{result.detections_count !== 1 ? "s" : ""} localized</p>
-              </div>
-            </div>
-            <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
-              <div className="flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-[var(--primary)]" /><p className="font-semibold text-sm">Clinical Note</p></div>
-              <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">MEDORA is an AI decision‑support system. Final diagnosis must be validated by a radiologist or clinician.</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Detection Details */}
-        <div className="mt-8 rounded-3xl bg-[var(--card)] p-6">
-          <h3 className="text-xl font-bold text-[var(--foreground)]">Detection Details</h3>
-          {result.detections.length > 0 ? (
-            <div className="mt-5 grid gap-4">
-              {result.detections.map((det, idx) => (
-                <div key={idx} className="bg-white rounded-2xl border border-[var(--border)] p-5">
-                  <div className="flex items-center justify-between flex-wrap gap-3">
-                    <h4 className="font-bold text-[var(--primary-dark)]">Region {idx + 1}</h4>
-                    <span className="text-sm font-semibold text-red-600">{det.confidence.toFixed(2)}%</span>
-                  </div>
-                  <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-                    <MiniDetail label="Center X" value={det.center_x.toString()} />
-                    <MiniDetail label="Center Y" value={det.center_y.toString()} />
-                    <MiniDetail label="Width" value={`${det.width_px}px`} />
-                    <MiniDetail label="Height" value={`${det.height_px}px`} />
-                  </div>
-                  {det.bbox && <div className="mt-4 rounded-xl bg-[var(--background)] border border-[var(--border)] p-4"><p className="text-xs text-[var(--text-soft)]">Bounding Box</p><p className="mt-1 text-sm font-medium break-all">[{det.bbox.join(", ")}]</p></div>}
+    if (loading) {
+        return (
+            <main className="min-h-screen bg-[var(--background)] flex items-center justify-center px-4">
+                <div className="rounded-[28px] bg-white px-8 py-6 shadow-[var(--shadow-soft)]">
+                    <p className="text-[var(--primary-dark)] font-semibold text-lg">
+                        Loading research panel...
+                    </p>
+                    <div className="mt-4 h-2 w-56 overflow-hidden rounded-full bg-[var(--secondary)]/40">
+                        <div className="h-full rounded-full bg-[var(--primary)] animate-progress-loading" />
+                    </div>
                 </div>
-              ))}
+            </main>
+        );
+    }
+
+    return (
+        <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
+            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    <img src="/logo.png" className="w-10 h-10" alt="MEDORA" />
+                    <div>
+                        <h1 className="text-xl font-bold text-[var(--primary-dark)]">
+                            MEDORA Research Panel
+                        </h1>
+                        <p className="text-sm text-[var(--text-soft)]">
+                            Real evaluation metrics computed from your Firestore cases
+                        </p>
+                    </div>
+                </div>
+                <button
+                    onClick={() => router.push("/dashboard")}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--primary-dark)] text-white font-semibold hover:bg-[var(--primary)]"
+                >
+                    <ArrowLeft className="h-4 w-4" />
+                    Dashboard
+                </button>
             </div>
-          ) : (
-            <p className="mt-4 text-sm text-[var(--text-soft)]">No detections available.</p>
-          )}
+
+            {error && (
+                <div className="max-w-7xl mx-auto mt-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {error}
+                </div>
+            )}
+
+            {!error && !hasGroundTruth && cases.length > 0 && (
+                <div className="max-w-7xl mx-auto mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                    Add a Firestore field <b>groundTruth</b> with value <b>Fracture</b> or{" "}
+                    <b>Normal</b> to your case documents to enable full evaluation
+                    (confusion matrix, ROC, PR curves).
+                </div>
+            )}
+
+            <div className="max-w-7xl mx-auto mt-8">
+                <div className="relative overflow-hidden rounded-[30px] bg-gradient-to-br from-[var(--primary)] via-[var(--primary-dark)] to-[#8c7ef1] p-6 sm:p-8 text-white shadow-[var(--shadow-soft)]">
+                    <div className="absolute -right-10 -top-10 h-36 w-36 rounded-full bg-white/10 blur-2xl" />
+                    <div className="absolute bottom-0 right-10 h-24 w-24 rounded-full bg-white/10 blur-2xl" />
+                    <div className="relative">
+                        <div className="flex items-center gap-2 text-white/90">
+                            <Microscope className="h-5 w-5" />
+                            <span className="text-sm font-medium">AI Evaluation Workspace</span>
+                        </div>
+                        <h2 className="mt-4 max-w-3xl text-2xl sm:text-3xl font-bold leading-tight">
+                            Real classification and explainability analytics from your stored
+                            cases.
+                        </h2>
+                        <p className="mt-3 max-w-3xl text-sm sm:text-base leading-7 text-white/85">
+                            This panel uses your Firestore case data directly to compute
+                            confusion matrix, ROC, precision-recall, confidence distribution,
+                            and latest-case explainability.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <div className="max-w-7xl mx-auto mt-8 grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
+                <MetricCard label="Cases" value={`${cases.length}`} icon={<Activity className="h-5 w-5" />} />
+                <MetricCard label="Evaluated" value={`${binaryMetrics.evaluatedCount}`} icon={<FileBarChart2 className="h-5 w-5" />} />
+                <MetricCard label="Accuracy" value={`${(binaryMetrics.accuracy * 100).toFixed(1)}%`} icon={<Target className="h-5 w-5" />} />
+                <MetricCard label="Recall" value={`${(binaryMetrics.recall * 100).toFixed(1)}%`} icon={<TrendingUp className="h-5 w-5" />} />
+                <MetricCard label="Precision" value={`${(binaryMetrics.precision * 100).toFixed(1)}%`} icon={<Brain className="h-5 w-5" />} />
+                <MetricCard label="F1" value={`${(binaryMetrics.f1 * 100).toFixed(1)}%`} icon={<ShieldCheck className="h-5 w-5" />} />
+                <MetricCard label="Latest Conf." value={`${(latestConfidence * 100).toFixed(1)}%`} icon={<ScanLine className="h-5 w-5" />} />
+                <MetricCard label="Risk" value={latestRisk} icon={<AlertTriangle className="h-5 w-5" />} />
+            </div>
+
+            <div className="max-w-7xl mx-auto mt-10 grid md:grid-cols-2 gap-6">
+                <RealChartCard title="Confusion Matrix Counts">
+                    <div className="h-[280px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={confusionData}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                <XAxis dataKey="name" />
+                                <YAxis allowDecimals={false} />
+                                <Tooltip />
+                                <Bar dataKey="value" fill="#7c6ee6" radius={[8, 8, 0, 0]} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </RealChartCard>
+
+                <RealChartCard title="Confidence Distribution">
+                    <div className="h-[280px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={confidenceHistogram}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                <XAxis dataKey="range" />
+                                <YAxis allowDecimals={false} />
+                                <Tooltip />
+                                <Bar dataKey="count" fill="#8c7ef1" radius={[8, 8, 0, 0]} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </RealChartCard>
+
+                <RealChartCard title="ROC Curve">
+                    <div className="h-[320px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={rocData}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="fpr" type="number" domain={[0, 1]} tickFormatter={(v) => v.toFixed(1)} />
+                                <YAxis dataKey="tpr" type="number" domain={[0, 1]} tickFormatter={(v) => v.toFixed(1)} />
+                                <Tooltip formatter={(value: any) => Number(value).toFixed(3)} />
+                                <Line type="monotone" dataKey="tpr" stroke="#7c6ee6" dot={false} />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+                </RealChartCard>
+
+                <RealChartCard title="Precision-Recall Curve">
+                    <div className="h-[320px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={prData}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="recall" type="number" domain={[0, 1]} tickFormatter={(v) => v.toFixed(1)} />
+                                <YAxis dataKey="precision" type="number" domain={[0, 1]} tickFormatter={(v) => v.toFixed(1)} />
+                                <Tooltip formatter={(value: any) => Number(value).toFixed(3)} />
+                                <Line type="monotone" dataKey="precision" stroke="#5b4fd8" dot={false} />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+                </RealChartCard>
+            </div>
+
+            <div className="max-w-7xl mx-auto mt-10 grid xl:grid-cols-[1.1fr_0.9fr] gap-6">
+                <div className="bg-white rounded-[28px] p-5 sm:p-6 shadow-[var(--shadow-card)]">
+                    <div className="flex items-center gap-2">
+                        <FlaskConical className="h-5 w-5 text-[var(--primary)]" />
+                        <h3 className="text-xl font-bold text-[var(--foreground)]">Explainability Review</h3>
+                    </div>
+                    <p className="mt-2 text-sm text-[var(--text-soft)]">Latest case from your Firestore data.</p>
+                    <div className="grid md:grid-cols-2 gap-4 mt-6">
+                        <ExplainCard title="YOLO Annotated Result" image={annotatedSrc} fallback="Annotated image not available" />
+                        <ExplainCard title="Grad-CAM Heatmap" image={gradCamSrc} fallback="Grad-CAM output not available" />
+                    </div>
+                </div>
+
+                <div className="bg-white rounded-[28px] p-5 sm:p-6 shadow-[var(--shadow-card)]">
+                    <h3 className="text-xl font-bold text-[var(--foreground)]">Latest Case Analysis</h3>
+                    <p className="mt-2 text-sm text-[var(--text-soft)]">Real latest-case details from your Firestore data.</p>
+                    <div className="mt-5 space-y-4">
+                        <DetailRow label="Case ID" value={latestCase?.id || "Not available"} />
+                        <DetailRow label="Filename" value={latestCase?.filename || "Not available"} />
+                        <DetailRow label="Prediction" value={latestCase?.prediction || "Not available"} />
+                        <DetailRow label="Confidence" value={`${(latestConfidence * 100).toFixed(1)}%`} />
+                        <DetailRow label="Risk Level" value={latestRisk} />
+                        <DetailRow label="Model" value={latestCase?.modelName || "EfficientNet-B3 + YOLOv8"} />
+                        <DetailRow label="Detected Regions" value={`${safeBoxes.length}`} />
+                    </div>
+                    <div className="mt-6 rounded-2xl bg-[var(--card)] p-4">
+                        <p className="text-sm font-semibold text-[var(--foreground)]">AI Summary</p>
+                        <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">
+                            {latestCase?.summary || "No live case summary available."}
+                        </p>
+                    </div>
+                    <div className="mt-4 rounded-2xl bg-[var(--card)] p-4">
+                        <p className="text-sm font-semibold text-[var(--foreground)]">Recommendation</p>
+                        <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">
+                            {latestCase?.recommendation ||
+                                "Clinical correlation and radiologist review are recommended for all AI-generated findings."}
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    );
+}
+
+// ---------- Helper Components with proper TypeScript types ----------
+function MetricCard({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+    return (
+        <div className="bg-white p-5 rounded-2xl shadow-[var(--shadow-card)]">
+            <div className="flex items-center gap-2 text-[var(--primary)]">
+                {icon}
+                <p className="text-sm text-[var(--text-soft)]">{label}</p>
+            </div>
+            <p className="text-2xl font-bold mt-3 text-[var(--foreground)]">{value}</p>
         </div>
+    );
+}
 
-        <div className="flex flex-col sm:flex-row gap-4 mt-8">
-          <button onClick={() => router.push("/upload")} className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium">Analyze Another</button>
-          <button onClick={() => window.print()} className="px-5 py-3 rounded-2xl bg-[var(--primary-dark)] text-white font-semibold">Download Report</button>
+function RealChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+    return (
+        <div className="bg-white p-6 rounded-[28px] shadow-[var(--shadow-card)]">
+            <h3 className="font-bold text-lg text-[var(--foreground)]">{title}</h3>
+            <div className="mt-5 rounded-2xl bg-[var(--card)] p-4">{children}</div>
         </div>
-      </div>
-    </main>
-  );
+    );
 }
 
-// Helper components
-function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }) {
-  return (
-    <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5">
-      <div className="flex items-center gap-2 text-[var(--primary)]">{icon}<span className="text-sm font-medium">{label}</span></div>
-      <p className={`mt-4 text-2xl font-bold ${valueClassName}`}>{value}</p>
-    </div>
-  );
+function ExplainCard({ title, image, fallback }: { title: string; image: string; fallback: string }) {
+    return (
+        <div className="rounded-2xl bg-[var(--card)] p-4">
+            <h4 className="text-sm font-medium text-[var(--text-soft)] mb-3">{title}</h4>
+            {image ? (
+                <img src={image} alt={title} className="rounded-xl shadow w-full object-contain max-h-[320px] bg-white" />
+            ) : (
+                <div className="rounded-xl border border-[var(--border)] bg-white min-h-[220px] flex items-center justify-center text-sm text-[var(--text-soft)] text-center px-4">
+                    {fallback}
+                </div>
+            )}
+        </div>
+    );
 }
 
-function ImagePanel({ title, children }) {
-  return (
-    <div className="rounded-3xl bg-[var(--card)] p-5">
-      <h3 className="text-sm font-medium text-[var(--text-soft)] mb-4">{title}</h3>
-      {children}
-    </div>
-  );
-}
-
-function EmptyImageMessage({ text }) {
-  return (
-    <div className="min-h-[250px] rounded-2xl border border-[var(--border)] bg-white flex items-center justify-center text-center px-4 text-sm text-[var(--text-soft)]">
-      {text}
-    </div>
-  );
-}
-
-function DetailRow({ label, value }) {
-  return (
-    <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] pb-3">
-      <span className="text-[var(--text-soft)]">{label}</span>
-      <span className="font-medium text-right break-all">{value}</span>
-    </div>
-  );
-}
-
-function MiniDetail({ label, value }) {
-  return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--background)] px-4 py-3">
-      <p className="text-xs text-[var(--text-soft)]">{label}</p>
-      <p className="mt-1 font-semibold text-sm">{value}</p>
-    </div>
-  );
+function DetailRow({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] pb-3">
+            <span className="text-sm text-[var(--text-soft)]">{label}</span>
+            <span className="text-sm font-medium text-[var(--foreground)] text-right break-words">{value}</span>
+        </div>
+    );
 }
   
