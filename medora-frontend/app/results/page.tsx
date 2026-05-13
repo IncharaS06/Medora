@@ -12,7 +12,6 @@ import {
     query,
     limit,
     orderBy,
-    where,
 } from "firebase/firestore";
 import {
     Activity,
@@ -26,7 +25,7 @@ import {
     RefreshCw,
 } from "lucide-react";
 
-// Types (same as before)
+// --- Exact types matching your Firestore document ---
 type Detection = {
     bbox: number[];
     center_x: number;
@@ -100,7 +99,7 @@ function getImageSrc(value?: string) {
 export default function ResultsPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
-    const caseIdParam = searchParams.get("case_id"); // optional case_id from URL
+    const caseIdParam = searchParams.get("case_id");
 
     const [user, setUser] = useState<User | null>(null);
     const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -137,54 +136,67 @@ export default function ResultsPage() {
 
             console.log("Fetching from Firestore, user UID:", user.uid);
 
-            // Try to get by specific case_id if provided
+            // --- Try multiple collection names if needed ---
+            const possibleCollections = ["cases", "Case", "results"];
+            let foundDoc = null;
+            let usedCollection = "";
+
+            // First, if case_id provided, try to find it in any collection
             if (caseIdParam) {
-                setDebugInfo(`Fetching case_id: ${caseIdParam}`);
-                const docRef = doc(db, "cases", caseIdParam);
-                const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) {
-                    processDocument(docSnap.id, docSnap.data());
+                setDebugInfo(`Looking for case_id: ${caseIdParam}`);
+                for (const collName of possibleCollections) {
+                    try {
+                        const docRef = doc(db, collName, caseIdParam);
+                        const docSnap = await getDoc(docRef);
+                        if (docSnap.exists()) {
+                            foundDoc = { id: docSnap.id, data: docSnap.data() };
+                            usedCollection = collName;
+                            break;
+                        }
+                    } catch (err) {
+                        console.warn(`Error checking ${collName}:`, err);
+                    }
+                }
+                if (foundDoc) {
+                    setDebugInfo(`Found document in ${usedCollection} by case_id`);
+                    processDocument(foundDoc.id, foundDoc.data);
                     return;
                 } else {
-                    setDebugInfo(`Document with ID ${caseIdParam} not found`);
-                    // Fall through to get latest
+                    setDebugInfo(`No document found with case_id: ${caseIdParam}`);
                 }
             }
 
-            // Attempt to get latest document by timestamp
-            setDebugInfo("Querying 'cases' collection, ordering by timestamp desc, limit 1");
-            const casesRef = collection(db, "cases");
-            let q;
-            try {
-                q = query(casesRef, orderBy("timestamp", "desc"), limit(1));
-            } catch (orderErr) {
-                console.warn("orderBy failed, using simple limit", orderErr);
-                setDebugInfo("orderBy failed, using simple limit (no timestamp field?)");
-                q = query(casesRef, limit(1));
-            }
-
-            const snapshot = await getDocs(q);
-            setDebugInfo(`Query returned ${snapshot.size} documents`);
-
-            if (snapshot.empty) {
-                // As a last resort, try to get ALL documents to see if any exist
-                setDebugInfo("No docs with limit, fetching all to check existence...");
-                const allDocs = await getDocs(casesRef);
-                setDebugInfo(`Total documents in 'cases': ${allDocs.size}`);
-                if (allDocs.size > 0) {
-                    // Use the first one
-                    const firstDoc = allDocs.docs[0];
-                    processDocument(firstDoc.id, firstDoc.data());
-                    return;
-                } else {
-                    setError("No analysis results found in Firestore. Please upload a scan first.");
-                    setResult(null);
-                    return;
+            // If no case_id or not found, get the latest document from any collection
+            for (const collName of possibleCollections) {
+                setDebugInfo(`Trying collection: ${collName}`);
+                try {
+                    const casesRef = collection(db, collName);
+                    let q;
+                    try {
+                        q = query(casesRef, orderBy("timestamp", "desc"), limit(1));
+                    } catch (orderErr) {
+                        console.warn(`orderBy timestamp failed on ${collName}, using simple limit`);
+                        q = query(casesRef, limit(1));
+                    }
+                    const snapshot = await getDocs(q);
+                    if (!snapshot.empty) {
+                        const docSnap = snapshot.docs[0];
+                        foundDoc = { id: docSnap.id, data: docSnap.data() };
+                        usedCollection = collName;
+                        break;
+                    }
+                } catch (err) {
+                    console.warn(`Error querying ${collName}:`, err);
                 }
             }
 
-            const docSnap = snapshot.docs[0];
-            processDocument(docSnap.id, docSnap.data());
+            if (foundDoc) {
+                setDebugInfo(`Found document in ${usedCollection}`);
+                processDocument(foundDoc.id, foundDoc.data);
+            } else {
+                setError("No analysis results found in Firestore. Please upload a scan first.");
+                setResult(null);
+            }
         } catch (err: any) {
             console.error("Fetch error:", err);
             setError(`Firestore error: ${err.message || err.code || "Unknown"}`);
@@ -205,27 +217,26 @@ export default function ResultsPage() {
         const stage2 = data.stage2_yolo || {};
         const imageUrls = data.image_urls || {};
 
-        const detections: Detection[] =
-            data.detections && Array.isArray(data.detections)
-                ? data.detections
-                : stage2.detections && Array.isArray(stage2.detections)
-                ? stage2.detections
-                : [];
+        let detections: Detection[] = [];
+        if (Array.isArray(data.detections)) {
+            detections = data.detections;
+        } else if (stage2.detections && Array.isArray(stage2.detections)) {
+            detections = stage2.detections;
+        }
+
+        const detectionsCount = data.detections_count ?? stage2.detections_count ?? detections.length;
+        const yoloConfidence = data.yolo_confidence ?? stage2.max_confidence ?? 0;
 
         const resultData: AnalysisResult = {
             id: docId,
             aspect_ratio: data.aspect_ratio || "",
             case_id: data.case_id || "",
             detections,
-            detections_count:
-                data.detections_count ??
-                stage2.detections_count ??
-                detections.length,
+            detections_count: detectionsCount,
             file_size_kb: data.file_size_kb || 0,
             filename: data.filename || "",
             final_result: data.final_result || "Unknown",
-            fracture_probability:
-                data.fracture_probability ?? stage1.fracture_probability ?? 0,
+            fracture_probability: data.fracture_probability ?? stage1.fracture_probability ?? 0,
             image_height: data.image_height || 0,
             image_urls: {
                 original_url: imageUrls.original_url || "",
@@ -235,8 +246,7 @@ export default function ResultsPage() {
             },
             image_width: data.image_width || 0,
             is_fracture: Boolean(data.is_fracture),
-            normal_probability:
-                data.normal_probability ?? stage1.normal_probability ?? 0,
+            normal_probability: data.normal_probability ?? stage1.normal_probability ?? 0,
             recommendation: data.recommendation || "",
             risk_level: data.risk_level || "Unknown",
             severity: data.severity || "",
@@ -253,7 +263,7 @@ export default function ResultsPage() {
             },
             summary: data.summary || "",
             timestamp: data.timestamp || "",
-            yolo_confidence: data.yolo_confidence ?? stage2.max_confidence ?? 0,
+            yolo_confidence: yoloConfidence,
         };
 
         setResult(resultData);
@@ -331,10 +341,11 @@ export default function ResultsPage() {
         );
     }
 
-    // Render the results UI (exactly the same as before)
+    // ------------------------------
+    // Beautiful UI (unchanged)
+    // ------------------------------
     return (
         <main className="min-h-screen bg-[var(--background)] p-4 sm:p-6">
-            {/* Header */}
             <div className="max-w-7xl mx-auto flex items-center justify-between">
                 <div className="flex items-center gap-3">
                     <img src="/logo.png" alt="MEDORA" className="w-10 h-10" />
@@ -348,9 +359,7 @@ export default function ResultsPage() {
                         disabled={refreshing}
                         className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 font-semibold hover:bg-gray-200 disabled:opacity-50 flex items-center gap-2"
                     >
-                        <RefreshCw
-                            className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`}
-                        />
+                        <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
                         Refresh
                     </button>
                     <button
@@ -369,12 +378,9 @@ export default function ResultsPage() {
                         Pediatric Wrist Fracture Analysis
                     </h2>
                     <p className="mt-2 text-[var(--text-soft)]">
-                        AI-assisted fracture detection with two‑stage pipeline
-                        (EfficientNet‑B3 + YOLOv8).
+                        AI-assisted fracture detection with two‑stage pipeline (EfficientNet‑B3 + YOLOv8).
                     </p>
-                    {debugInfo && (
-                        <p className="mt-2 text-xs text-gray-400">{debugInfo}</p>
-                    )}
+                    {debugInfo && <p className="mt-2 text-xs text-gray-400">{debugInfo}</p>}
                 </div>
 
                 {/* Summary Cards */}
@@ -383,9 +389,7 @@ export default function ResultsPage() {
                         icon={<Activity className="w-5 h-5" />}
                         label="Final Result"
                         value={result.final_result}
-                        valueClassName={
-                            result.is_fracture ? "text-red-600" : "text-green-600"
-                        }
+                        valueClassName={result.is_fracture ? "text-red-600" : "text-green-600"}
                     />
                     <SummaryCard
                         icon={<FileBarChart2 className="w-5 h-5" />}
@@ -424,11 +428,7 @@ export default function ResultsPage() {
                         title="Uploaded Image"
                         content={
                             originalSrc ? (
-                                <img
-                                    src={originalSrc}
-                                    alt="Original X-ray"
-                                    className="rounded-2xl shadow w-full object-contain max-h-[420px]"
-                                />
+                                <img src={originalSrc} alt="Original" className="rounded-2xl shadow w-full object-contain max-h-[420px]" />
                             ) : (
                                 <EmptyImageMessage text="Original image not available" />
                             )
@@ -438,11 +438,7 @@ export default function ResultsPage() {
                         title="YOLO Annotated Image"
                         content={
                             annotatedSrc ? (
-                                <img
-                                    src={annotatedSrc}
-                                    alt="YOLO detections"
-                                    className="rounded-2xl shadow w-full object-contain max-h-[420px]"
-                                />
+                                <img src={annotatedSrc} alt="Annotated" className="rounded-2xl shadow w-full object-contain max-h-[420px]" />
                             ) : (
                                 <EmptyImageMessage text="Annotated image not available" />
                             )
@@ -452,13 +448,9 @@ export default function ResultsPage() {
                         title="Grad‑CAM Heatmap"
                         content={
                             gradCamSrc ? (
-                                <img
-                                    src={gradCamSrc}
-                                    alt="Grad-CAM"
-                                    className="rounded-2xl shadow w-full object-contain max-h-[420px]"
-                                />
+                                <img src={gradCamSrc} alt="Gradcam" className="rounded-2xl shadow w-full object-contain max-h-[420px]" />
                             ) : (
-                                <EmptyImageMessage text="Grad‑CAM heatmap not available" />
+                                <EmptyImageMessage text="Grad‑CAM not available" />
                             )
                         }
                     />
@@ -492,37 +484,20 @@ export default function ResultsPage() {
                             <DetailRow label="Filename" value={result.filename} />
                             <DetailRow label="Timestamp" value={result.timestamp} />
                             <DetailRow label="Aspect Ratio" value={result.aspect_ratio} />
-                            <DetailRow
-                                label="Image Size"
-                                value={`${result.image_width} × ${result.image_height}`}
-                            />
+                            <DetailRow label="Image Size" value={`${result.image_width} × ${result.image_height}`} />
                             <DetailRow label="File Size" value={`${result.file_size_kb} KB`} />
-                            <DetailRow
-                                label="Normal Probability"
-                                value={`${result.normal_probability.toFixed(2)}%`}
-                            />
-                            <DetailRow
-                                label="YOLO Max Confidence"
-                                value={`${result.yolo_confidence.toFixed(2)}%`}
-                            />
+                            <DetailRow label="Normal Probability" value={`${result.normal_probability.toFixed(2)}%`} />
+                            <DetailRow label="YOLO Max Confidence" value={`${result.yolo_confidence.toFixed(2)}%`} />
                         </div>
 
                         <div className="mt-6 rounded-2xl bg-white border border-[var(--border)] p-5">
                             <div className="flex items-center gap-2">
                                 <Layers className="w-4 h-4 text-[var(--primary)]" />
-                                <p className="font-semibold text-sm">
-                                    Two‑Stage Pipeline
-                                </p>
+                                <p className="font-semibold text-sm">Two‑Stage Pipeline</p>
                             </div>
                             <div className="mt-3 text-sm text-[var(--text-soft)] space-y-1">
-                                <p>
-                                    📊 EfficientNet‑B3:{" "}
-                                    {result.stage1_efficientnet.confidence_level} confidence
-                                </p>
-                                <p>
-                                    🎯 YOLOv8: {result.detections_count} region
-                                    {result.detections_count !== 1 ? "s" : ""} localized
-                                </p>
+                                <p>📊 EfficientNet‑B3: {result.stage1_efficientnet.confidence_level} confidence</p>
+                                <p>🎯 YOLOv8: {result.detections_count} region{result.detections_count !== 1 ? "s" : ""} localized</p>
                             </div>
                         </div>
 
@@ -532,8 +507,7 @@ export default function ResultsPage() {
                                 <p className="font-semibold text-sm">Clinical Note</p>
                             </div>
                             <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">
-                                MEDORA is an AI decision‑support system. Final diagnosis
-                                must be validated by a radiologist or clinician.
+                                MEDORA is an AI decision‑support system. Final diagnosis must be validated by a radiologist or clinician.
                             </p>
                         </div>
                     </div>
@@ -541,23 +515,14 @@ export default function ResultsPage() {
 
                 {/* Detection Details */}
                 <div className="mt-8 rounded-3xl bg-[var(--card)] p-6">
-                    <h3 className="text-xl font-bold text-[var(--foreground)]">
-                        Detection Details
-                    </h3>
+                    <h3 className="text-xl font-bold text-[var(--foreground)]">Detection Details</h3>
                     {result.detections.length > 0 ? (
                         <div className="mt-5 grid gap-4">
                             {result.detections.map((det, idx) => (
-                                <div
-                                    key={idx}
-                                    className="bg-white rounded-2xl border border-[var(--border)] p-5"
-                                >
+                                <div key={idx} className="bg-white rounded-2xl border border-[var(--border)] p-5">
                                     <div className="flex items-center justify-between flex-wrap gap-3">
-                                        <h4 className="font-bold text-[var(--primary-dark)]">
-                                            Region {idx + 1}
-                                        </h4>
-                                        <span className="text-sm font-semibold text-red-600">
-                                            {det.confidence.toFixed(2)}%
-                                        </span>
+                                        <h4 className="font-bold text-[var(--primary-dark)]">Region {idx + 1}</h4>
+                                        <span className="text-sm font-semibold text-red-600">{det.confidence.toFixed(2)}%</span>
                                     </div>
                                     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
                                         <MiniDetail label="Center X" value={det.center_x.toString()} />
@@ -565,38 +530,26 @@ export default function ResultsPage() {
                                         <MiniDetail label="Width" value={`${det.width_px}px`} />
                                         <MiniDetail label="Height" value={`${det.height_px}px`} />
                                     </div>
-                                    {det.bbox && det.bbox.length > 0 && (
+                                    {det.bbox && (
                                         <div className="mt-4 rounded-xl bg-[var(--background)] border border-[var(--border)] p-4">
-                                            <p className="text-xs text-[var(--text-soft)]">
-                                                Bounding Box
-                                            </p>
-                                            <p className="mt-1 text-sm font-medium break-all">
-                                                [{det.bbox.join(", ")}]
-                                            </p>
+                                            <p className="text-xs text-[var(--text-soft)]">Bounding Box</p>
+                                            <p className="mt-1 text-sm font-medium break-all">[{det.bbox.join(", ")}]</p>
                                         </div>
                                     )}
                                 </div>
                             ))}
                         </div>
                     ) : (
-                        <p className="mt-4 text-sm text-[var(--text-soft)]">
-                            No detections available.
-                        </p>
+                        <p className="mt-4 text-sm text-[var(--text-soft)]">No detections available.</p>
                     )}
                 </div>
 
                 {/* Actions */}
                 <div className="flex flex-col sm:flex-row gap-4 mt-8">
-                    <button
-                        onClick={() => router.push("/upload")}
-                        className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium"
-                    >
+                    <button onClick={() => router.push("/upload")} className="px-5 py-3 rounded-2xl border border-[var(--border)] bg-white font-medium">
                         Analyze Another
                     </button>
-                    <button
-                        onClick={() => window.print()}
-                        className="px-5 py-3 rounded-2xl bg-[var(--primary-dark)] text-white font-semibold"
-                    >
+                    <button onClick={() => window.print()} className="px-5 py-3 rounded-2xl bg-[var(--primary-dark)] text-white font-semibold">
                         Download Report
                     </button>
                 </div>
@@ -605,7 +558,9 @@ export default function ResultsPage() {
     );
 }
 
-// Helper components (same as before)
+// ------------------------------
+// Helper Components (unchanged)
+// ------------------------------
 function SummaryCard({ icon, label, value, valueClassName = "text-[var(--foreground)]" }: { icon: React.ReactNode; label: string; value: string; valueClassName?: string }) {
     return (
         <div className="rounded-2xl bg-[var(--background)] border border-[var(--border)] p-5">
