@@ -18,7 +18,6 @@ export default function DashboardLayout({
         { name: "Upload Scan", href: "/upload" },
         { name: "Results", href: "/results" },
         { name: "Case History", href: "/history" },
-        { name: "Research Panel", href: "/research" },
         { name: "Settings", href: "/settings" },
     ];
 
